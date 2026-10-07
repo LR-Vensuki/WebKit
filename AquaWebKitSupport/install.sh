@@ -1,7 +1,8 @@
 #!/bin/bash
 # install.sh — copy the staged product (WebKitBuild/Release/staged, laid out exactly as it lands on disk
 # by scripts/stage-frameworks.sh) onto the 10.9 system where stock Safari 7.0.6 loads it, then the few
-# things that live in host files nobody builds. See scripts/framework-layout.sh for the layout.
+# things that live in host files nobody builds. See scripts/framework-layout.sh for the layout. Where
+# Safari 9.1.3 is installed instead, safari9/safari9.sh then points it at the same frameworks.
 #
 # The factory (stock) frameworks are preserved ONCE in $STOCK_BACKUP (captured at build time by
 # stage-frameworks.sh); a re-run only replaces our own previous build and backs nothing up.
@@ -150,4 +151,13 @@ echo "  installed."
 # ---------------------------------------------------------------------------
 echo "### Verifying the installed product"
 wk_verify_tree "" "the installed system"
+
+# ---------------------------------------------------------------------------
+# Safari 9.1.3, where it is installed instead of Safari 7: its Safari.framework binds WebKit 601's
+# layout, which safari9/safari9.sh maps onto this one (see docs/SAFARI-9.md). The frameworks above are
+# already in place and verified, so a failure here leaves Safari 9 as it was and is reported, not fatal.
+if [ -f /System/Library/StagedFrameworks/Safari/Safari.framework/Versions/A/Safari ]; then
+    bash "$HERE/safari9/safari9.sh" install \
+        || echo "WARNING: Safari 9 was not set up for this port; see the errors above and docs/SAFARI-9.md." >&2
+fi
 echo "### Done."

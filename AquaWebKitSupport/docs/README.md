@@ -10,3 +10,5 @@ vendored deps, and each of those directories carries its own README for its own 
   the backport must satisfy on 10.9: the frozen 725-symbol core Safari 7 binds against, across JavaScriptCore /
   WebKitLegacy / WebKit2, plus the extra legacy surface Mail and QuickLook need, and how the contract data in
   `../host-abi/` was captured.
+- **[SAFARI-9.md](SAFARI-9.md)** — running Safari 9.1.3, the last Safari for 10.9, on the port: how it
+  reaches the port's frameworks, how its ABI compares with Safari 7's, and what `../safari9/safari9.sh` changes.

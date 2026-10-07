@@ -272,7 +272,9 @@ comm -12 safari-imports.txt exports-JavaScriptCore.txt > safari-needs-from-JavaS
 ```
 and likewise for `WebKit.framework/Versions/A/WebKit` (24) and `WebKit2.framework/Versions/A/WebKit2` (606). Safari
 imports 2110 symbols in all; the remaining ~1385 come from system frameworks and 0 from WebCore directly.
-`StagedFrameworks/Safari` (a Safari-9 mechanism) is empty and unused by Safari 7.
+`StagedFrameworks/Safari` (a Safari-9 mechanism) is empty and unused by Safari 7. Safari 9.1.3, which fills it,
+binds 627 WebKit symbols, all "from WebKit"; 619 of them are in the contracts above, and
+`safari9-needs-from-WebKit2.txt` holds the full set (see [SAFARI-9.md](SAFARI-9.md)).
 
 `public-needs-from-<framework>.txt` holds every symbol the stock framework's re-export closure exported that
 the stock 10.9 public headers (`<stock>/<framework>.framework/Headers`) declare: the classes those headers
