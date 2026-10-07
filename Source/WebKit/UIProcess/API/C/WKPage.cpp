@@ -3980,6 +3980,25 @@ typedef void (*WK109StorageManagerDidClearFunction)(WKErrorRef, void*);
 WK_EXPORT void WKPluginSiteDataManagerClearAllSiteData(WKWebsiteDataStoreRef, void*, WK109StorageManagerDidClearFunction);
 WK_EXPORT void WKPluginSiteDataManagerClearSiteData(WKWebsiteDataStoreRef, WKArrayRef, uint64_t, uint64_t, void*, WK109StorageManagerDidClearFunction);
 WK_EXPORT void WKPluginSiteDataManagerGetSitesWithData(WKWebsiteDataStoreRef, void*, WK109StorageManagerGetOriginsFunction);
+// AQUAWEBKIT: Safari 9 (WebKit 601) reaches IndexedDB and the rest of a site's data through the
+// origin-data manager, which upstream folded into WKWebsiteDataStore after 601. Its getter and
+// deleters take the same callback shapes as the managers above; the type bits are 601's.
+enum {
+    kWKApplicationCacheOriginData = 1 << 0,
+    kWKCookieOriginData = 1 << 1,
+    kWKIndexedDatabaseData = 1 << 2,
+    kWKKeyValueStorageOriginData = 1 << 3,
+    kWKMediaCacheOriginData = 1 << 4,
+    kWKPluginDataOriginData = 1 << 5,
+    kWKResourceCacheOriginData = 1 << 6,
+    kWKWebSQLDatabaseOriginData = 1 << 7,
+    kWKMediaKeyStorageOriginData = 1 << 8,
+};
+typedef uint32_t WKOriginDataTypes;
+WK_EXPORT WKWebsiteDataStoreRef WKContextGetOriginDataManager(WKContextRef);
+WK_EXPORT void WKOriginDataManagerGetOrigins(WKWebsiteDataStoreRef, WKOriginDataTypes, void*, WK109StorageManagerGetOriginsFunction);
+WK_EXPORT void WKOriginDataManagerDeleteEntriesForOrigin(WKWebsiteDataStoreRef, WKOriginDataTypes, WKSecurityOriginRef, void*, WK109StorageManagerDidClearFunction);
+WK_EXPORT void WKOriginDataManagerDeleteAllEntries(WKWebsiteDataStoreRef, WKOriginDataTypes, void*, WK109StorageManagerDidClearFunction);
 WK_EXPORT bool WKBundleBackForwardListItemIsInPageCache(void*);
 WK_EXPORT void WKBundlePageSetDiagnosticLoggingClient(void*, void*);
 }
@@ -4095,6 +4114,76 @@ void WKPluginSiteDataManagerClearSiteData(WKWebsiteDataStoreRef, WKArrayRef, uin
         callback(nullptr, context);
 }
 void WKPluginSiteDataManagerGetSitesWithData(WKWebsiteDataStoreRef, void* context, WK109StorageManagerGetOriginsFunction callback) { wk109AnswerWithEmptyList(context, callback); }
+
+// AQUAWEBKIT: Safari 9's origin-data manager, answered from the default WKWebsiteDataStore like the
+// managers above. 601 itself only served kWKIndexedDatabaseData; the other bits select the matching
+// website data types here, and the ones naming features this engine lacks (application cache, media
+// cache, plug-in data) select nothing, so a query for only those answers with an empty list.
+static void wkSafari9AddWebsiteDataTypes(OptionSet<WebKit::WebsiteDataType>& dataTypes, WKOriginDataTypes types)
+{
+    if (types & kWKCookieOriginData)
+        dataTypes.add(WebKit::WebsiteDataType::Cookies);
+    if (types & kWKIndexedDatabaseData)
+        dataTypes.add(WebKit::WebsiteDataType::IndexedDBDatabases);
+    if (types & kWKKeyValueStorageOriginData)
+        dataTypes.add(WebKit::WebsiteDataType::LocalStorage);
+    if (types & kWKResourceCacheOriginData)
+        dataTypes.add({ WebKit::WebsiteDataType::DiskCache, WebKit::WebsiteDataType::MemoryCache });
+    if (types & kWKWebSQLDatabaseOriginData)
+        dataTypes.add(WebKit::WebsiteDataType::WebSQLDatabases);
+    if (types & kWKMediaKeyStorageOriginData)
+        dataTypes.add(WebKit::WebsiteDataType::MediaKeys);
+}
+
+WKWebsiteDataStoreRef WKContextGetOriginDataManager(WKContextRef) { return WKWebsiteDataStoreGetDefaultDataStore(); }
+
+void WKOriginDataManagerGetOrigins(WKWebsiteDataStoreRef store, WKOriginDataTypes types, void* context, WK109StorageManagerGetOriginsFunction callback)
+{
+    OptionSet<WebKit::WebsiteDataType> dataTypes;
+    wkSafari9AddWebsiteDataTypes(dataTypes, types);
+    if (dataTypes.isEmpty()) {
+        wk109AnswerWithEmptyList(context, callback);
+        return;
+    }
+    wk109AnswerWithOrigins(store, dataTypes, context, callback);
+}
+
+// Safari hands both deleters Safari::WK::didDeleteEntriesCallback(OpaqueWKError const*, void*) with its
+// continuation as the context, so each answers once the removal is done, or at once when there is
+// nothing to remove.
+void WKOriginDataManagerDeleteEntriesForOrigin(WKWebsiteDataStoreRef store, WKOriginDataTypes types, WKSecurityOriginRef originRef, void* context, WK109StorageManagerDidClearFunction callback)
+{
+    OptionSet<WebKit::WebsiteDataType> dataTypes;
+    wkSafari9AddWebsiteDataTypes(dataTypes, types);
+    if (dataTypes.isEmpty() || !originRef) {
+        if (callback)
+            callback(nullptr, context);
+        return;
+    }
+    WebKit::WebsiteDataRecord record;
+    for (auto type : dataTypes)
+        record.add(type, protect(toImpl(originRef))->securityOrigin());
+    protect(toImpl(store))->removeData(dataTypes, { record }, [context, callback] {
+        if (callback)
+            callback(nullptr, context);
+    });
+}
+
+void WKOriginDataManagerDeleteAllEntries(WKWebsiteDataStoreRef store, WKOriginDataTypes types, void* context, WK109StorageManagerDidClearFunction callback)
+{
+    OptionSet<WebKit::WebsiteDataType> dataTypes;
+    wkSafari9AddWebsiteDataTypes(dataTypes, types);
+    if (dataTypes.isEmpty()) {
+        if (callback)
+            callback(nullptr, context);
+        return;
+    }
+    protect(toImpl(store))->removeData(dataTypes, WallTime::fromRawSeconds(0), [context, callback] {
+        if (callback)
+            callback(nullptr, context);
+    });
+}
+
 bool WKBundleBackForwardListItemIsInPageCache(void*) { return false; }
 void WKBundlePageSetDiagnosticLoggingClient(void*, void*) {}
 }

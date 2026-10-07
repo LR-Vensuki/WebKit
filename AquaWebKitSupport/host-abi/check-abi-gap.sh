@@ -3,6 +3,10 @@
 # product. Each contract is a list of symbols stock 10.9 exported (see docs/MAVERICKS-WEBKIT-ABI-REFERENCE.md
 # for how each was captured):
 #   safari-needs-from-<framework>.txt   what stock Safari 7 imports
+#   safari9-needs-from-WebKit2.txt      what Safari 9.1.3 for 10.9 binds "from WebKit" (WebKit 601's WK2
+#                                       framework), which resolves through WebKit2 here once
+#                                       safari9/safari9.sh has repointed that load command; its
+#                                       JavaScriptCore imports are Safari 7's, symbol for symbol
 #   public-needs-from-<framework>.txt   the 10.9 SDK's public API: symbols its WebKit and JavaScriptCore
 #                                       headers declare
 #   system-needs-from-<framework>.txt   what every other binary on a stock 10.9 system imports
