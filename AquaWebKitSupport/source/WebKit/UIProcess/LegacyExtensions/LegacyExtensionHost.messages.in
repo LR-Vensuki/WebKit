@@ -6,5 +6,6 @@
     ExceptionForEnabledBy
 ]
 messages -> LegacyExtensionHost {
+    OpenInQuickTimePlayer(WebCore::FrameIdentifier frameID, WebCore::ScriptExecutionContextIdentifier documentID, URL documentURL, String extensionKey, URL url) -> (Expected<URL, String> result)
     Post(WebCore::FrameIdentifier frameID, WebCore::ScriptExecutionContextIdentifier documentID, URL documentURL, String extensionKey, String message)
 }

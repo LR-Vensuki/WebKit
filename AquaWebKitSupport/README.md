@@ -197,3 +197,5 @@ generations are removed after a successful update check.
 archive extraction, rejection of tampered CRX3 data and malformed MAR indexes, and scoped host paths.
 Use [the castLabs VMP lab](https://castlabs.github.io/wv-vmp-lab/) in Safari for the integration check:
 the license response must report `PLATFORM_SOFTWARE_VERIFIED`, and media time must advance.
+
+`extensions/SendToQuickTime.safariextension/` provides a toolbar button and video context menu for `aqua.quickTimePlayer.open`; load it with Safari 7’s Extension Builder.

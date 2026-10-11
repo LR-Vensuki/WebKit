@@ -565,6 +565,19 @@ void LegacyExtensionHost::unloadExtensionIfUnused(const String& extensionKey)
 
 // Content contexts.
 
+void LegacyExtensionHost::openInQuickTimePlayer(IPC::Connection& connection, WebCore::FrameIdentifier frameID, WebCore::ScriptExecutionContextIdentifier documentID, URL&& documentURL, String&& extensionKey, URL&& url, CompletionHandler<void(Expected<URL, String>&&)>&& completionHandler)
+{
+    RefPtr frame = WebFrameProxy::webFrame(frameID);
+    if (!frame || !frame->page() || !protect(frame->process())->hasConnection(connection) || extensionKey.isEmpty())
+        return completionHandler(makeUnexpected("no-source"_s));
+    m_documents.set(documentID, std::pair { frameID, documentURL });
+    if (!url.protocolIsInHTTPFamily())
+        return completionHandler(makeUnexpected("unsupported-source"_s));
+    if (!frame->page()->openURLInQuickTimePlayer(url))
+        return completionHandler(makeUnexpected("quicktime-unavailable"_s));
+    completionHandler(WTF::move(url));
+}
+
 void LegacyExtensionHost::post(IPC::Connection& connection, WebCore::FrameIdentifier frameID, WebCore::ScriptExecutionContextIdentifier documentID, URL&& documentURL, String&& extensionKey, String&& message)
 {
     RefPtr frame = WebFrameProxy::webFrame(frameID);

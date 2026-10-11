@@ -15,6 +15,11 @@
 #include <WebCore/DocumentInlines.h>
 #include <WebCore/DocumentPage.h>
 #include <WebCore/HTMLFrameOwnerElement.h>
+#include <WebCore/HTMLMediaElement.h>
+#include <WebCore/SecurityOrigin.h>
+#include <JavaScriptCore/JSRetainPtr.h>
+#include <JavaScriptCore/JSStringRef.h>
+#include <wtf/Expected.h>
 #include <WebCore/JSDOMWindow.h>
 #include <WebCore/JSElement.h>
 #include <WebCore/JSWindowProxy.h>
@@ -136,6 +141,75 @@ static JSValueRef contentContextWithClipboardWriteAccess(JSContextRef context, J
     return result;
 }
 
+struct QuickTimePromise {
+    JSRetainPtr<JSGlobalContextRef> context;
+    JSObjectRef resolve;
+    JSObjectRef reject;
+
+    QuickTimePromise(JSContextRef context, JSObjectRef resolve, JSObjectRef reject)
+        : context(JSContextGetGlobalContext(context)), resolve(resolve), reject(reject)
+    {
+        JSValueProtect(context, resolve);
+        JSValueProtect(context, reject);
+    }
+
+    ~QuickTimePromise()
+    {
+        JSValueUnprotect(context.get(), resolve);
+        JSValueUnprotect(context.get(), reject);
+    }
+
+    void complete(Expected<URL, String>&& result)
+    {
+        auto text = result ? result->string() : result.error();
+        auto string = adopt(JSStringCreateWithUTF8CString(text.utf8().data()));
+        JSValueRef value = JSValueMakeString(context.get(), string.get());
+        if (result) {
+            auto object = JSON::Object::create();
+            object->setString("method"_s, "url"_s);
+            object->setString("url"_s, text);
+            auto json = adopt(JSStringCreateWithUTF8CString(object->toJSONString().utf8().data()));
+            value = JSValueMakeFromJSONString(context.get(), json.get());
+        } else
+            value = JSObjectMakeError(context.get(), 1, &value, nullptr);
+        JSObjectCallAsFunction(context.get(), result ? resolve : reject, nullptr, 1, &value, nullptr);
+    }
+};
+
+static JSValueRef contentContextOpenInQuickTimePlayer(JSContextRef context, JSObjectRef, JSObjectRef thisObject, size_t argumentCount, const JSValueRef arguments[], JSValueRef* exception)
+{
+    JSObjectRef resolve;
+    JSObjectRef reject;
+    auto promise = JSObjectMakeDeferredPromise(context, &resolve, &reject, exception);
+    if (!promise)
+        return JSValueMakeUndefined(context);
+    auto pending = std::make_unique<QuickTimePromise>(context, resolve, reject);
+    auto* native = static_cast<ContentContextNative*>(JSObjectGetPrivate(thisObject));
+    RefPtr document = documentForNative(*native);
+    auto* globalObject = toJS(context);
+    JSC::JSLockHolder lock(globalObject->vm());
+    RefPtr media = argumentCount ? dynamicDowncast<WebCore::HTMLMediaElement>(WebCore::JSElement::toWrapped(globalObject->vm(), toJS(globalObject, arguments[0]))) : nullptr;
+    if (!document || !media || !document->securityOrigin().isSameOriginDomain(media->document().securityOrigin()) || media->currentSrc().isEmpty()) {
+        pending->complete(makeUnexpected("no-source"_s));
+        return promise;
+    }
+    if (!media->currentSrc().protocolIsInHTTPFamily()) {
+        pending->complete(makeUnexpected("unsupported-source"_s));
+        return promise;
+    }
+    URL source = media->currentSrc();
+    WebProcess::singleton().parentProcessConnection()->sendWithAsyncReply(Messages::LegacyExtensionHost::OpenInQuickTimePlayer(native->frameID, native->documentIdentifier, document->url(), native->extensionKey, source), [pending = WTF::move(pending), media = WeakPtr { *media }, native = *native, targetDocument = media->document().identifier(), source](IPC::Connection* connection, Expected<URL, String>&& result) mutable {
+        if (!connection)
+            return pending->complete(makeUnexpected("quicktime-unavailable"_s));
+        if (!documentForNative(native) || !media || media->document().identifier() != targetDocument || media->currentSrc() != source)
+            return pending->complete(makeUnexpected("no-source"_s));
+        if (result)
+            media->pause();
+        pending->complete(WTF::move(result));
+    }, 0);
+    return promise;
+}
+
 static void contentContextFinalize(JSObjectRef object)
 {
     delete static_cast<ContentContextNative*>(JSObjectGetPrivate(object));
@@ -145,6 +219,7 @@ static JSClassRef contentContextNativeClass(LegacyExtensions::ContextKind kind)
 {
     static JSClassRef contentClass = [] {
         static const JSStaticFunction functions[] = {
+            { "openInQuickTimePlayer", contentContextOpenInQuickTimePlayer, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
             { "send", contentContextSend, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
             { "insertCSS", contentContextInsertCSS, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
             { "removeCSS", contentContextRemoveCSS, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },

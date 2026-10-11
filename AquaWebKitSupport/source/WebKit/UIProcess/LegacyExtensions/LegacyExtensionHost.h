@@ -18,6 +18,7 @@
 #include <WebCore/ScriptExecutionContextIdentifier.h>
 #include <wtf/CompletionHandler.h>
 #include <wtf/HashMap.h>
+#include <wtf/Expected.h>
 #include <wtf/JSONValues.h>
 #include <wtf/Markable.h>
 #include <wtf/NeverDestroyed.h>
@@ -159,6 +160,7 @@ private:
         CompletionHandler<void(String&&)> completionHandler;
     };
 
+    void openInQuickTimePlayer(IPC::Connection&, WebCore::FrameIdentifier, WebCore::ScriptExecutionContextIdentifier, URL&& documentURL, String&& extensionKey, URL&&, CompletionHandler<void(Expected<URL, String>&&)>&&);
     void post(IPC::Connection&, WebCore::FrameIdentifier, WebCore::ScriptExecutionContextIdentifier, URL&& documentURL, String&& extensionKey, String&& message);
 
     void route(const Endpoint&, const String& extensionKey, const String& message);

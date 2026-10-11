@@ -425,3 +425,13 @@ Safari 7's extension resource protocol has limits that apply to every file in th
 ## Testing
 
 `AquaWebKitSupport/tests/legacy-extensions/` holds `api-test.safariextension`, which exercises every namespace against a local server (`server.py`, ports 8843 and 8844), `limited-access.safariextension`, whose website access is `localhost` alone, `declarative-net-request.safariextension`, whose rules act on the loads of `pages/dnr.html` (results in `window.__results`; the extension reports its API calls to the server log as `dnr-api`), and `display-or-download.safariextension`, which decides whether the server's `/inline/` responses display or download: open `/inline/login`, then `/inline/doc.pdf` (its viewer shows `window.__result`), `/inline/data.bin` and `/inline/force-download.html`, and the `/plain/` paths of the same names, which no extension changes. `/plain/clip.mp4` and `/plain/server-inline.mp4` (the server's own `Content-Disposition: inline`) download unless `WebKitPlayMediaFilesInline` is on. Build the extensions in Safari's Extension Builder, then open `pages/coverage.html` from the server; results collect in `window.__results`. Extension Builder installs do not persist across Safari relaunches; click Install again after relaunching.
+
+## The aqua namespace
+
+`aqua` is a non-enumerable global in extension content scripts and extension pages loaded in tabs or frames. Its media API requires a DOM element in that process; global pages and popovers have no `aqua` namespace. Web pages cannot see it.
+
+`aqua.quickTimePlayer.open(mediaElement)` returns a Promise resolving to `{ method: "url", url }` when QuickTime Player accepts the element's HTTP(S) media URL. Native HLS playlists and progressive media files use this path. The element is paused after a successful handoff. QuickTime can continue playing that URL after the tab closes.
+
+The Promise rejects with an Error whose `message` is `no-source` for a missing element or source, `unsupported-source` for a non-HTTP(S) source, or `quicktime-unavailable` if LaunchServices cannot open QuickTime Player.
+
+The example extension is `AquaWebKitSupport/extensions/SendToQuickTime.safariextension/`. Load it in Safari 7's Extension Builder. Its toolbar button chooses the largest visible playing video, then the largest visible video, including open shadow roots and same-origin frames. Its context menu opens the selected video. A failed handoff sets a badge, with the reason in the toolbar button's tooltip.

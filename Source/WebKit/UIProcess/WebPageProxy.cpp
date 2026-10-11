@@ -10452,7 +10452,7 @@ void WebPageProxy::decidePolicyForResponseShared(Ref<WebProcessProxy>&& process,
 #if PLATFORM(MAC)
         // AQUAWEBKIT: the QuickTime Player hand-off decided above. Ignoring the response
         // leaves the current page in place.
-        if (!playlistToPlayInQuickTimePlayer.isNull() && openMediaPlaylistInQuickTimePlayer(playlistToPlayInQuickTimePlayer))
+        if (!playlistToPlayInQuickTimePlayer.isNull() && openURLInQuickTimePlayer(playlistToPlayInQuickTimePlayer))
             policyAction = PolicyAction::Ignore;
 #endif
         completionHandlerWrapper(policyAction);

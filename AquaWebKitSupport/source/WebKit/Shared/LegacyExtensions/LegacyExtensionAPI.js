@@ -766,6 +766,13 @@ function receiverTable() {
     return receiverTable.table;
 }
 
+if (typeof native.openInQuickTimePlayer === "function") {
+    Object.defineProperty(globalThis, "aqua", {
+        value: { quickTimePlayer: { open: element => native.openInQuickTimePlayer(element) } },
+        writable: true, configurable: true, enumerable: false
+    });
+}
+
 Object.defineProperty(globalThis, "browser", { value: browser, writable: true, configurable: true, enumerable: false });
 
 return json => {
