@@ -1,5 +1,5 @@
 # Messages from a web content process's Safari 7 extension contexts (content scripts and extension pages)
-# to the UI process's router.
+# to the UI process's router, with the bytes a message carries.
 [
     DispatchedFrom=WebContent,
     DispatchedTo=UI,
@@ -7,5 +7,5 @@
 ]
 messages -> LegacyExtensionHost {
     OpenInQuickTimePlayer(WebCore::FrameIdentifier frameID, WebCore::ScriptExecutionContextIdentifier documentID, URL documentURL, String extensionKey, URL url) -> (Expected<URL, String> result)
-    Post(WebCore::FrameIdentifier frameID, WebCore::ScriptExecutionContextIdentifier documentID, URL documentURL, String extensionKey, String message)
+    Post(WebCore::FrameIdentifier frameID, WebCore::ScriptExecutionContextIdentifier documentID, URL documentURL, String extensionKey, String message, IPC::SharedBufferReference data)
 }
