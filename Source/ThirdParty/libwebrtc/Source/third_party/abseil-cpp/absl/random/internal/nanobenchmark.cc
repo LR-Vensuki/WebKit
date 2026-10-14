@@ -475,7 +475,16 @@ Ticks TimerResolution() {
   return robust_statistics::Mode(repetitions);
 }
 
-static const Ticks timer_resolution = TimerResolution();
+// AQUAWEBKIT: measured on first use rather than by a static initializer. TimerResolution() times
+// itself with rdtscp, which Core 2 Macs (supported by 10.9) lack, and this initializer ran in every
+// process that loads libwebrtc -- WebCore links it -- so those Macs died with EXC_BAD_INSTRUCTION
+// before main. Nothing in WebKit benchmarks with this file, so the timer now never runs.
+// static const Ticks timer_resolution = TimerResolution();
+static Ticks TimerResolutionOnFirstUse() {
+  static const Ticks resolution = TimerResolution();
+  return resolution;
+}
+#define timer_resolution TimerResolutionOnFirstUse()
 
 // Estimates the expected value of "lambda" values with a variable number of
 // samples until the variability "rel_mad" is less than "max_rel_mad".
