@@ -508,7 +508,15 @@ void MacroAssemblerX86_64::collectCPUFeatures()
             s_sse4_2CheckState = (cpuid[2] & (1 << 20)) ? CPUIDCheckState::Set : CPUIDCheckState::Clear;
             s_popcntCheckState = (cpuid[2] & (1 << 23)) ? CPUIDCheckState::Set : CPUIDCheckState::Clear;
 #if OS(DARWIN)
-            s_avxCheckState = CPUIDCheckState::Set;
+            // AQUAWEBKIT: upstream takes AVX for granted on Darwin, as every Mac current macOS runs on has
+            // it. 10.9 also runs on Core 2, Nehalem and Westmere Macs, which do not, and the VEX-encoded JIT
+            // code faults there with EXC_BAD_INSTRUCTION on the first double conversion. Ask the kernel, as
+            // for BMI1 and AVX2 below; it reports AVX only where the CPU has it and the OS saves its state.
+            // s_avxCheckState = CPUIDCheckState::Set;
+            uint32_t avxValue = 0;
+            size_t avxValueSize = sizeof(avxValue);
+            int avxRC = sysctlbyname("hw.optional.avx1_0", &avxValue, &avxValueSize, nullptr, 0);
+            s_avxCheckState = (avxRC >= 0 && avxValue) ? CPUIDCheckState::Set : CPUIDCheckState::Clear;
 #else
             s_avxCheckState = (cpuid[2] & (1 << 28)) ? CPUIDCheckState::Set : CPUIDCheckState::Clear;
 #endif
