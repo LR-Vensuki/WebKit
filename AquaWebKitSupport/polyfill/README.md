@@ -5,7 +5,7 @@ byte-identical to upstream. This directory is where those polyfills live.
 
 **Writing one should require no knowledge of how any of this loads.** Declare the polyfill for a
 symbol 10.9 lacks; the layer guarantees it is what WebKit uses, and that nothing outside WebKit is
-affected. Verify the symbol really is absent on 10.9 — the build gate (below) fails if it is not — but
+affected. Verify on a 10.9 host that the symbol really is absent, but
 you never have to reason about archives, link order or export tables. If you find yourself doing that,
 something here has failed and should be fixed rather than worked around.
 
@@ -16,7 +16,7 @@ something here has failed and should be fixed rather than worked around.
 | `polyfills/` | **The polyfills.** The rule below says which file. |
 | `mechanism/` | How the layer loads. You should not need to read this to add a polyfill. |
 | `headers/` | Header overlays on every WebKit compile's include path (`-idirafter`): declarations the modern tree includes that no SDK provides, and the port's `WebKitAdditions/AdditionalPlatformHave.h`. |
-| `tests/` | `mechanism/` checks the layer's guarantees hold on this OS, `behaviour/` checks one polyfill each (named after its framework), `gates/` holds the shadow gates' probe programs. `build-polyfill.sh` runs the gates. |
+| `tests/` | `mechanism/` checks the layer's guarantees hold on this OS, `behaviour/` checks one polyfill each (named after its framework). |
 | `build-polyfill.sh` | The build. |
 | `build/` | Its output (gitignored). |
 
@@ -32,7 +32,11 @@ named after the system framework or library that owns the symbols** (the first a
 | `shared/` | `libpolyfill.a` **and** the vendored non-WebKit builds (`deps/build_deps.sh`, `toolchain/scripts/build_python3.sh`) | Plain C compiled against the host headers, with no `wk_polyfill.h` dependency: the libc gap-fills (`shared/LICENSE`, wrapper headers in `shared/include/`) and this port's own. A registry entry may be added under `#ifdef WK_POLYFILL_REGISTERED`, which only this layer's build defines — that is how `jit.c`'s deliberate `mmap` override shows up in `WK_POLYFILL_REPORT`. Put a polyfill here only when something outside WebKit compiles it. |
 | `webkit/` | `libpolyfill_webkit.a`, force-loaded into **WebKit.framework** only (ARC) | Units whose ObjC classes must register in WebKit alone: `websocket.mm` (NSURLSessionWebSocketTask over CFStream), the stub classes Safari binds out of WebKit. |
 | `jsc/` | `libwtf_compat.a`, force-loaded into **JavaScriptCore** only | The WTF C++ entry points Safari 7 binds by mangled name. |
-| `cdm/` | `libwidevinegap.dylib`, loaded by the Widevine CDM | The libSystem entry points Google's module imports and 10.9 lacks. |
+| `cdm/` | `libwidevinegap.dylib`, loaded by the Widevine CDM | Missing libSystem entry points. |
+
+The CDM library also packages the Widevine backend's private `WidevineHostPaths.c` adapter from
+`source/WebCore/platform/graphics/gstreamer/eme/`. Its scoped path functions supply the CDM's
+verification identities and are compiled separately from the system polyfills.
 
 ## Adding a polyfill
 
@@ -43,7 +47,7 @@ Include `wk_polyfill.h`. The first argument names whichever framework owns the s
 
 ```c
 // The default, for a symbol 10.9 LACKS. The body runs. If 10.9 turns out to have the symbol, the
-// build gate rejects it -- so verify absence on-host rather than guessing.
+// body replaces 10.9's -- so verify absence on-host rather than guessing.
 WK_POLYFILL_ABSENT("CoreGraphics", CGImageRef, CGIOSurfaceContextCreateImageReference,
                    (CGContextRef context))
 {
@@ -62,13 +66,13 @@ WK_POLYFILL_REPLACES("CoreText", CTFontDescriptorRef, CTFontManagerCreateFontDes
 }
 
 // A data constant 10.9 LACKS. The declared value is the value; there is no mirroring. As with a
-// function, the gate rejects a gap-fill constant 10.9 actually exports.
+// function, verify on-host that 10.9 does not export it.
 WK_POLYFILL_CONST("CoreGraphics", CFStringRef, kCGColorSpaceExtendedRange,
                   CFSTR("kCGColorSpaceExtendedRange"));
 ```
 
-`WK_POLYFILL_ABSENT` and `WK_POLYFILL_REPLACES` are one mechanism, differing only in the intent the
-gate reads; both take a single parameter list and run the body directly (a variadic function is fine).
+`WK_POLYFILL_ABSENT` and `WK_POLYFILL_REPLACES` are one mechanism, differing only in the intent they
+declare (`WK_POLYFILL_REPORT` reads it); both take a single parameter list and run the body directly (a variadic function is fine).
 
 If the body needs to call some *other* 10.9 function that WebKit's frameworks may not all link,
 declare it with `WK_SYSTEM_FN` and call it through `WK_SYSTEM(name)` instead of calling it directly.
@@ -89,8 +93,8 @@ block is a subclass of the named class that nothing instantiates: the compiler c
 against the SDK's declaration and `self` is typed. You do not need to work out which other classes
 might share the selector — a class that has the real method gets its own implementation automatically.
 
-Like a C gap-fill, this is for a method 10.9 LACKS: the body runs, and the build gate rejects an
-`ADD` whose method 10.9 actually implements. When *deliberately shadowing* a method 10.9 HAS is the
+Like a C gap-fill, this is for a method 10.9 LACKS: the body runs, and an `ADD` whose method 10.9
+actually implements replaces 10.9's. When *deliberately shadowing* a method 10.9 HAS is the
 point, use the counterpart of `WK_POLYFILL_REPLACES`, and reach the implementation replaced with
 `WK_ORIGINAL_METHOD(RET, (ARG TYPES), args...)`:
 
@@ -114,11 +118,6 @@ WK_POLYFILL_ADD_METHODS_ON(NSObject, "NSURLSessionTask", "__NSCFURLSessionTask")
 @end
 ```
 
-Readonly CALayer properties use `WK_POLYFILL_ADD_LAYER_PROPERTIES_ON`. It registers native property
-metadata whose getter is the scoped selector. CALayer KVC and Foundation KVO read that getter,
-including the initial, old, new, and prior values. State changes bracket a coherent update with
-`willChangeValueForKey:` and `didChangeValueForKey:`.
-
 ### An Objective-C class 10.9 lacks entirely
 
 Add the stub to `classes/<Framework>.m`. A class whose implementation needs a library only WebCore links
@@ -140,6 +139,12 @@ is compiled into both the polyfill archive and the dependency gap archive. Its u
   by the Foundation policy adapter.
 - The protection-space secure-coding bridge in `CFNetwork.c` (`SerializableArchive::add`), which archives
   the native protection space used by Safari's authentication and certificate APIs.
+- The keyed-coding layer in `methods/FoundationCoding.m`, which resolves Foundation's `_decodeObjectBinary`
+  and `_decodeObjectXML` element decoders and CoreFoundation's keyed-archive UID accessors and binary
+  property-list readers (`__CFBinaryPlistGetOffsetForValueFromDictionary3`,
+  `__CFBinaryPlistGetOffsetForValueFromArray2`, `__CFBinaryPlistCreateObject`) for its private unarchiver
+  subclass. Strict secure decoding reads each object reference's `$objects` entry through them before the
+  native decode.
 - The WebCore initializer in `polyfills/methods/Accelerate.m`, which resolves
   `SetvImageVectorAvailable` from vImage and `_get_cpu_capabilities` from libsystem_kernel. It clears
   Darwin's `kHasAVX2_0` bit (`0x20000000`) in vImage's process-local dispatch mask. Mavericks' packed
@@ -164,21 +169,6 @@ Set `WK_POLYFILL_REPORT=1` in the environment to have each process print its pol
 symbol, whether 10.9 has it, and which side won. `WK_POLYFILL_REPORT=abort` additionally fails the
 process if a `WK_POLYFILL_REPLACES` targets a symbol 10.9 does not have — i.e. if the premise behind
 a replacement ("10.9 has this but it is broken") is wrong.
-
-`build-polyfill.sh` runs the shadow gates (probe programs `tests/gates/`), which ask the running 10.9 (via
-`dlopen`/`dlsym`, not the build SDK) whether any symbol the built archives define is one 10.9 already
-provides. Because every polyfill body runs unconditionally, a defined symbol 10.9 also has is a silent
-shadow, so it must be declared `WK_POLYFILL_REPLACES` or the build fails — for registry symbols and for
-the plain-C `shared/` and mechanism units alike. There is no allowlist: every symbol the layer knowingly
-shadows says so in the registry, where the loader and `WK_POLYFILL_REPORT` see it.
-
-The gates ask the ObjC runtime the same question about every method block: they enumerate each
-block's methods and target classes out of the built method objects, and then — in a second program
-with none of the layer linked in, so what it sees is the system's own — walk each target class and its
-superclasses for the public selector. An `ADD` method 10.9 already implements fails the build (the
-rewrite makes WebKit run the body in place of 10.9's) unless it is in a `REPLACE` block; so does the
-same method defined for one class by two blocks, or a `REPLACE` of one selector on two classes of a
-single inheritance chain. A `WK_POLYFILL_CLASS` stub for a class 10.9 has fails the same way.
 
 ## How it works, in brief
 

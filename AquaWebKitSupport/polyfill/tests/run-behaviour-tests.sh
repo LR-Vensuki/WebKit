@@ -24,11 +24,12 @@ T="$OBJ/tests"
 trap 'rm -rf "$OBJ"' EXIT
 mkdir -p "$T" "$OBJ/methods" "$OBJ/mech"
 
-PROBE_LIBS="$OUT/libpolyfill.a $REPO/AquaWebKitSupport/deps/build/lib/libots.a $REPO/AquaWebKitSupport/deps/build/lib/libwoff2dec.a $REPO/AquaWebKitSupport/deps/build/lib/libbrotlidec.a $REPO/AquaWebKitSupport/deps/build/lib/libbrotlicommon.a $REPO/AquaWebKitSupport/deps/build/lib/libpng16.a $REPO/AquaWebKitSupport/deps/build/lib/libtiff.a $REPO/AquaWebKitSupport/deps/build/lib/libjpeg.a $REPO/AquaWebKitSupport/deps/build/lib/libicuuc.a $REPO/AquaWebKitSupport/deps/build/lib/libpsl.5.dylib $REPO/AquaWebKitSupport/deps/build/lib/libcrypto.dylib -L$REPO/AquaWebKitSupport/deps/build/lib -lc++ -Wl,-rpath,$REPO/AquaWebKitSupport/deps/build/lib -framework Foundation -framework CoreFoundation -framework CFNetwork -framework CoreGraphics -framework IOSurface -framework CoreText -framework Security -framework CoreMedia -Wl,-rpath,$OUT -lsqlite3 -lbsm -lsandbox -lobjc -lz"
+PROBE_LIBS="$OUT/libpolyfill.a $REPO/AquaWebKitSupport/deps/build/lib/libots.a $REPO/AquaWebKitSupport/deps/build/lib/libwoff2dec.a $REPO/AquaWebKitSupport/deps/build/lib/libbrotlidec.a $REPO/AquaWebKitSupport/deps/build/lib/libbrotlicommon.a $REPO/AquaWebKitSupport/deps/build/lib/libpng16.a $REPO/AquaWebKitSupport/deps/build/lib/libtiff.a $REPO/AquaWebKitSupport/deps/build/lib/libjpeg.a $REPO/AquaWebKitSupport/deps/build/lib/libicuuc.a $REPO/AquaWebKitSupport/deps/build/lib/libpsl.5.dylib $REPO/AquaWebKitSupport/deps/build/lib/libcrypto.dylib -L$REPO/AquaWebKitSupport/deps/build/lib -lc++ -Wl,-rpath,$REPO/AquaWebKitSupport/deps/build/lib -framework Foundation -framework CoreFoundation -framework CFNetwork -framework CoreGraphics -framework IOSurface -framework CoreText -framework Security -framework CoreMedia -Wl,-rpath,$OUT -lbsm -lsandbox -lobjc -lz"
 ICU_LIBS="$REPO/AquaWebKitSupport/deps/build/lib/libicuuc.a $REPO/AquaWebKitSupport/deps/build/lib/libicudata.a -lc++"
 
 APPKIT_OBJECT_STATE=unbuilt
 FOUNDATION_OBJECT_STATE=unbuilt
+FOUNDATIONCODING_OBJECT_STATE=unbuilt
 AVFOUNDATION_OBJECT_STATE=unbuilt
 QUARTZCORE_OBJECT_STATE=unbuilt
 CRYPTOKITPRIVATE_OBJECT_STATE=unbuilt
@@ -45,6 +46,10 @@ build_method_object() {
         Foundation)
             state="$FOUNDATION_OBJECT_STATE"
             source="$PF/methods/Foundation.m"
+            ;;
+        FoundationCoding)
+            state="$FOUNDATIONCODING_OBJECT_STATE"
+            source="$PF/methods/FoundationCoding.m"
             ;;
         AVFoundation)
             state="$AVFOUNDATION_OBJECT_STATE"
@@ -73,6 +78,7 @@ build_method_object() {
         case "$unit" in
             AppKit) APPKIT_OBJECT_STATE=built ;;
             Foundation) FOUNDATION_OBJECT_STATE=built ;;
+            FoundationCoding) FOUNDATIONCODING_OBJECT_STATE=built ;;
             AVFoundation) AVFOUNDATION_OBJECT_STATE=built ;;
             QuartzCore) QUARTZCORE_OBJECT_STATE=built ;;
             CryptoKitPrivate) CRYPTOKITPRIVATE_OBJECT_STATE=built ;;
@@ -83,6 +89,7 @@ build_method_object() {
     case "$unit" in
         AppKit) APPKIT_OBJECT_STATE=failed ;;
         Foundation) FOUNDATION_OBJECT_STATE=failed ;;
+        FoundationCoding) FOUNDATIONCODING_OBJECT_STATE=failed ;;
         AVFoundation) AVFOUNDATION_OBJECT_STATE=failed ;;
         QuartzCore) QUARTZCORE_OBJECT_STATE=failed ;;
         CryptoKitPrivate) CRYPTOKITPRIVATE_OBJECT_STATE=failed ;;
@@ -148,6 +155,10 @@ probe_accent_color() {
         "$T/accent_color"
 }
 
+probe_scrolling_axis_filter() {
+    /usr/bin/python "$TBEHAV/AppKit-scrolling-axis-filter.py" "$OUT/libpolyfill_classes.dylib"
+}
+
 probe_pasteboard_expiration() {
     prepare_method_objects AppKit &&
         "$CLANG" $MODERN $INC -fno-objc-arc -o "$T/pasteboard_expiration" "$TBEHAV/AppKit-pasteboard-expiration.m" \
@@ -168,6 +179,16 @@ probe_share_picker_popover() {
             -framework AppKit -framework Foundation -framework CoreServices "$OUT/libpolyfill_classes.dylib" \
             $PROBE_LIBS &&
         "$T/share_picker_popover"
+}
+
+probe_popover_focus() {
+    prepare_method_objects AppKit &&
+        "$CLANG" $MODERN $INC -fno-objc-arc -o "$T/popover_focus" "$TBEHAV/AppKit-popover-focus.m" \
+            "$OBJ/methods/AppKit.o" "$OBJ/mech/wk_selref_scope.o" \
+            -Wl,-force_load,"$OUT/libwk_marker.a" "$OUT/libpolyfill.a" \
+            -framework AppKit -framework Foundation -framework CoreServices "$OUT/libpolyfill_classes.dylib" \
+            $PROBE_LIBS &&
+        "$T/popover_focus"
 }
 
 probe_level_indicator_direction() {
@@ -487,17 +508,36 @@ probe_session_invalidation() {
 
 probe_dd_secure_coding() {
     "$CLANG" $MODERN $INC -fno-objc-arc -o "$T/dd_secure_coding" "$TBEHAV/DataDetectors-secure-coding.m" \
-        $PROBE_LIBS && "$T/dd_secure_coding"
+        -Wl,-rpath,"$OUT" "$OUT/libpolyfill_classes.dylib" $PROBE_LIBS && "$T/dd_secure_coding"
+}
+
+probe_dd_result_categories() {
+    "$CLANG" $MODERN $INC -o "$T/dd_result_categories" "$TBEHAV/DataDetectors-result-categories.c" \
+        $PROBE_LIBS && "$T/dd_result_categories"
 }
 
 probe_keyed_coding() {
-    "$CLANG" $MODERN $INC -fno-objc-arc -o "$T/keyed_coding" "$TBEHAV/Foundation-keyed-coding.m" \
-        $PROBE_LIBS && "$T/keyed_coding"
+    prepare_method_objects FoundationCoding &&
+        "$CLANG" $MODERN $INC -fno-objc-arc -o "$T/keyed_coding" "$TBEHAV/Foundation-keyed-coding.m" \
+            "$OBJ/methods/FoundationCoding.o" "$OBJ/mech/wk_selref_scope.o" \
+            -Wl,-force_load,"$OUT/libwk_marker.a" $PROBE_LIBS &&
+        "$T/keyed_coding"
+}
+
+probe_strict_inline_values() {
+    prepare_method_objects FoundationCoding &&
+        "$CLANG" $MODERN $INC -fno-objc-arc -o "$T/strict_inline_values" "$TBEHAV/Foundation-strict-inline-values.m" \
+            "$OBJ/methods/FoundationCoding.o" "$OBJ/mech/wk_selref_scope.o" \
+            -Wl,-force_load,"$OUT/libwk_marker.a" $PROBE_LIBS &&
+        "$T/strict_inline_values"
 }
 
 probe_url_response_coding() {
-    "$CLANG" $MODERN $INC -fno-objc-arc -o "$T/url_response_coding" "$TBEHAV/Foundation-url-response-coding.m" \
-        $PROBE_LIBS && "$T/url_response_coding"
+    prepare_method_objects FoundationCoding &&
+        "$CLANG" $MODERN $INC -fno-objc-arc -o "$T/url_response_coding" "$TBEHAV/Foundation-url-response-coding.m" \
+            "$OBJ/methods/FoundationCoding.o" "$OBJ/mech/wk_selref_scope.o" \
+            -Wl,-force_load,"$OUT/libwk_marker.a" $PROBE_LIBS &&
+        "$T/url_response_coding"
 }
 
 probe_secure_coding() {
@@ -518,6 +558,16 @@ probe_url_request_coding() {
             -framework AppKit -framework Foundation -framework CoreServices "$OUT/libpolyfill_classes.dylib" \
             $PROBE_LIBS &&
         "$T/url_request_coding"
+}
+
+probe_url_request_attribution() {
+    prepare_method_objects Foundation &&
+        "$CLANG" $MODERN $INC -fno-objc-arc -o "$T/url_request_attribution" "$TBEHAV/Foundation-url-request-attribution.m" \
+            "$OBJ/methods/Foundation.o" "$OBJ/mech/wk_selref_scope.o" \
+            -Wl,-force_load,"$OUT/libwk_marker.a" "$OUT/libpolyfill.a" \
+            -framework AppKit -framework Foundation -framework CoreServices "$OUT/libpolyfill_classes.dylib" \
+            $PROBE_LIBS &&
+        "$T/url_request_attribution"
 }
 
 probe_url_data_representation() {
@@ -632,6 +682,16 @@ probe_pq_profile() {
         "$T/pq_profile"
 }
 
+probe_icc_matrix_shaper() {
+    "$CLANG" $MODERN $INC -Wno-unguarded-availability -Wno-unguarded-availability-new -o "$T/icc_matrix_shaper" "$TBEHAV/CoreGraphics-icc-matrix-shaper.c" $PROBE_LIBS &&
+        "$T/icc_matrix_shaper"
+}
+
+probe_named_color_spaces() {
+    "$CLANG" $MODERN $INC -Wno-unguarded-availability -Wno-unguarded-availability-new -o "$T/named_color_spaces" "$TBEHAV/CoreGraphics-named-spaces.c" $PROBE_LIBS &&
+        "$T/named_color_spaces"
+}
+
 probe_hdr_gainmap() {
     "$CLANG" $MODERN $INC -Wno-unguarded-availability -Wno-unguarded-availability-new -fno-objc-arc -o "$T/hdr_gainmap" "$TBEHAV/ImageIO-hdr-gainmap.m" $PROBE_LIBS \
         -framework CoreVideo -framework ImageIO &&
@@ -657,6 +717,12 @@ probe_encode_low_latency() {
     "$CLANG" $MODERN $INC -o "$T/encode_low_latency" "$TBEHAV/VideoToolbox-low-latency.c" $PROBE_LIBS \
         -framework VideoToolbox -framework CoreVideo &&
         "$T/encode_low_latency"
+}
+
+probe_pixel_buffer_conformer() {
+    "$CLANG" $MODERN $INC -o "$T/pixel_buffer_conformer" "$TBEHAV/VideoToolbox-conformer.c" $PROBE_LIBS \
+        -framework VideoToolbox -framework CoreVideo &&
+        "$T/pixel_buffer_conformer"
 }
 
 probe_h264_parameter_sets() {
@@ -745,6 +811,13 @@ probe_feature_settings_order() {
     "$CLANG" $MODERN $INC -o "$T/feature_settings_order" "$TBEHAV/CoreText-feature-settings-order.c" $PROBE_LIBS \
         -framework CoreText -framework CoreGraphics -lc++ &&
         "$T/feature_settings_order" "$REPO/LayoutTests/imported/w3c/web-platform-tests/css/css-fonts/support/fonts/FontWithFancyFeatures.otf"
+}
+
+probe_opentype_only_features() {
+    "$CLANG" $MODERN $INC -o "$T/opentype_only_features" "$TBEHAV/CoreText-opentype-only-features.c" $PROBE_LIBS \
+        -framework CoreText -framework CoreGraphics -lc++ &&
+        "$T/opentype_only_features" "$REPO/LayoutTests/imported/w3c/web-platform-tests/css/css-fonts/support/fonts/FontWithFancyFeatures.otf" \
+            "$REPO/LayoutTests/imported/w3c/web-platform-tests/css/css-fonts/support/fonts/gsubtest-lookup3.otf"
 }
 
 probe_variation_axes() {
@@ -865,9 +938,11 @@ probe_audiounit_max_frames() {
 }
 
 run_probe accent_color "$@"
+run_probe scrolling_axis_filter "$@"
 run_probe level_indicator_direction "$@"
 run_probe pasteboard_expiration "$@"
 run_probe share_picker_popover "$@"
+run_probe popover_focus "$@"
 run_probe touch_bar "$@"
 run_probe scrollview_insets "$@"
 run_probe color_popover_top_bar "$@"
@@ -907,8 +982,11 @@ run_probe private_storage_session "$@"
 run_probe session_invalidation "$@"
 run_probe secure_coding "$@"
 run_probe url_request_coding "$@"
+run_probe url_request_attribution "$@"
 run_probe dd_secure_coding "$@"
+run_probe dd_result_categories "$@"
 run_probe keyed_coding "$@"
+run_probe strict_inline_values "$@"
 run_probe url_response_coding "$@"
 run_probe getentropy "$@"
 run_probe mkostemp "$@"
@@ -933,11 +1011,14 @@ run_probe font_collections "$@"
 run_probe h264_parameter_sets "$@"
 run_probe encode_cadence "$@"
 run_probe encode_low_latency "$@"
+run_probe pixel_buffer_conformer "$@"
 run_probe public_suffix "$@"
 run_probe cookie_notifications "$@"
 run_probe cookie_foreign_changes "$@"
 run_probe display_p3_profile "$@"
 run_probe pq_profile "$@"
+run_probe icc_matrix_shaper "$@"
+run_probe named_color_spaces "$@"
 run_probe hdr_gainmap "$@"
 run_probe cmyk_row_mask "$@"
 run_probe colr_filled_paths "$@"
@@ -948,6 +1029,7 @@ run_probe typo_metrics "$@"
 run_probe font_heights "$@"
 run_probe variable_font_tables "$@"
 run_probe feature_settings_order "$@"
+run_probe opentype_only_features "$@"
 run_probe variation_axes "$@"
 run_probe variation_axes_from_data "$@"
 run_probe path_glyph_range "$@"

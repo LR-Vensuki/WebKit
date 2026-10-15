@@ -17,6 +17,7 @@
 #include "HTTPParsers.h"
 #include "HTTPStatusCodes.h"
 #include "HTTPStrictTransportSecurityStore.h"
+#include "LegacyLoadInterceptor.h"
 #include "CocoaMIMESniffing.h"
 #include "OriginAccessPatterns.h"
 #include "ResourceLoaderOptions.h"
@@ -83,6 +84,7 @@ void CocoaCurlResourceHandle::detachTransfer()
         connection->invalidateClient();
     if (m_continuation)
         std::exchange(m_continuation, nullptr)();
+    m_holdsDelivery = false;
 }
 void CocoaCurlResourceHandle::detach()
 {
@@ -199,26 +201,42 @@ void CocoaCurlResourceHandle::beginTransfer()
     m_connection->start();
 }
 // commit each wire field before the next authentication request.
-void CocoaCurlResourceHandle::curlReceivedCookies(Vector<String>&& fields, int, const String&, const String&, CompletionHandler<void(std::optional<String>&&)>&& completion)
+void CocoaCurlResourceHandle::curlReceivedCookies(Vector<String>&& fields, int statusCode, const String&, const String&, CompletionHandler<void(std::optional<String>&&)>&& completion)
 {
     if (m_cancelled || !m_handle) {
         completion(std::nullopt);
         return;
     }
-    if (m_storage && m_request.allowCookies()) {
-        auto sameSite = SameSiteInfo::create(m_request);
-        for (auto& field : fields) {
-            auto cookie = parseHTTPSetCookie(field, m_request.url());
-            if (cookie && (cookie->sameSite == Cookie::SameSitePolicy::None || sameSite.isSameSite || sameSite.isTopSite))
-                m_storage->setCookie(*cookie, m_request.url(), m_request.firstPartyForCookies());
-        }
+    if (auto* interceptor = LegacyLoadInterceptor::singleton(); interceptor && statusCode != 401 && statusCode != 407 && interceptor->holdsReceivedCookies(*m_handle)) {
+        m_heldCookies = WTF::move(fields);
+        completion(std::nullopt);
+        return;
     }
+    storeCookies(fields);
     if (!m_storage || !m_request.allowCookies() || (m_request.hasHTTPHeaderField(HTTPHeaderName::Cookie) && !m_generatedCookie)) {
         completion(std::nullopt);
         return;
     }
     auto value = m_storage->cookieRequestHeaderFieldValue(m_request.firstPartyForCookies(), cookieRequestSameSiteInfo(m_request), m_request.url(), std::nullopt, std::nullopt, m_request.url().protocolIs("https"_s) ? IncludeSecureCookies::Yes : IncludeSecureCookies::No, ApplyTrackingPrevention::Yes, ShouldRelaxThirdPartyCookieBlocking::No, IsKnownCrossSiteTracker::No).first;
     completion(WTF::move(value));
+}
+void CocoaCurlResourceHandle::storeCookies(const Vector<String>& fields)
+{
+    if (!m_storage || !m_request.allowCookies())
+        return;
+    auto sameSite = SameSiteInfo::create(m_request);
+    for (auto& field : fields) {
+        auto cookie = parseHTTPSetCookie(field, m_request.url());
+        if (cookie && (cookie->sameSite == Cookie::SameSitePolicy::None || sameSite.isSameSite || sameSite.isTopSite))
+            m_storage->setCookie(*cookie, m_request.url(), m_request.firstPartyForCookies());
+    }
+}
+void CocoaCurlResourceHandle::storeHeldCookies(std::optional<Vector<String>>&& fields)
+{
+    auto held = std::exchange(m_heldCookies, std::nullopt);
+    if (!held || m_cancelled)
+        return;
+    storeCookies(fields ? *fields : *held);
 }
 void CocoaCurlResourceHandle::curlReceivedResponse(CocoaCurlTransferResponse&& response, CompletionHandler<void()>&& completion)
 {
@@ -546,25 +564,28 @@ void CocoaCurlResourceHandle::curlSentData(uint64_t sent, uint64_t total)
     if (!m_cancelled && handle && handle->client())
         handle->client()->didSendData(handle.get(), sent, total);
 }
-void CocoaCurlResourceHandle::curlReceivedData(const SharedBuffer& data, CompletionHandler<void()>&& completion)
+void CocoaCurlResourceHandle::curlReceivedData(const SharedBuffer& data)
 {
-    if (m_cancelled || !m_handle) {
-        completion();
+    if (m_cancelled || !m_handle)
         return;
-    }
-    m_continuation = WTF::move(completion);
+    ASSERT(!m_waitingForPolicy);
     if (m_needsSniff) {
         m_sniffed.append(data.span());
         if (m_sniffed.size() >= MIMESniffer::sniffedPrefixLength) {
             m_response.response.setMimeType(MIMESniffer::computeHTTPMIMEType(m_sniffed.span().first(MIMESniffer::sniffedPrefixLength), m_response.response.mimeType(), m_response.contentType, m_noSniff));
             m_needsSniff = false;
+            holdDelivery();
             publishResponse();
-        } else
-            continueTransfer();
+        }
         return;
     }
     deliver(data.span());
-    continueTransfer();
+}
+void CocoaCurlResourceHandle::holdDelivery()
+{
+    if (std::exchange(m_holdsDelivery, true) || !m_connection)
+        return;
+    m_connection->setHoldsDelivery(true);
 }
 void CocoaCurlResourceHandle::deliver(std::span<const uint8_t> bytes)
 {
@@ -604,6 +625,7 @@ void CocoaCurlResourceHandle::didReceiveHeaderFromMultipart(Vector<String>&& fie
     auto type = response.httpHeaderField(HTTPHeaderName::ContentType);
     setCocoaCurlContentType(response, type);
     m_waitingForPolicy = true;
+    holdDelivery();
     auto callback = [loader = Ref { *this }, response = WTF::move(response)]() mutable {
         RefPtr handle = loader->m_handle;
         if (loader->m_cancelled || !handle || !handle->client())
@@ -695,6 +717,8 @@ void CocoaCurlResourceHandle::continueTransfer()
 {
     if (m_cancelled || m_waitingForPolicy)
         return;
+    if (std::exchange(m_holdsDelivery, false) && m_connection)
+        m_connection->setHoldsDelivery(false);
     if (m_continuation) {
         std::exchange(m_continuation, nullptr)();
         return;
@@ -741,12 +765,19 @@ void CocoaCurlResourceHandle::finish(const ResourceError& error)
 std::optional<CocoaCurlDownloadTransfer> CocoaCurlResourceHandle::takeDownload()
 {
     // a short representation can finish while MIME detection still holds its response policy; transfer that buffered terminal state too.
-    if (m_queue || m_cancelled || !m_storage || !m_waitingForPolicy || (!m_continuation && !m_result))
+    if (m_queue || m_cancelled || !m_storage || !m_waitingForPolicy || (!m_continuation && !m_holdsDelivery && !m_result))
         return std::nullopt;
     m_handle = nullptr;
     m_cancelled = true;
     m_response.metrics = m_metrics;
     m_cacheBody.reset();
-    return CocoaCurlDownloadTransfer { std::exchange(m_connection, nullptr),m_pool.copyRef(), m_storage, m_request, m_connectionURL, m_response, std::exchange(m_continuation, nullptr), std::exchange(m_sniffed, { }), m_generatedCookie, m_allowCredentials, m_result };
+    // The download continues the transfer: it completes the response, or releases the held delivery, whose
+    // waiting callbacks then reach the download in order.
+    CompletionHandler<void()> completion;
+    if (m_continuation)
+        completion = std::exchange(m_continuation, nullptr);
+    else if (std::exchange(m_holdsDelivery, false) && m_connection)
+        completion = [connection = m_connection] { connection->setHoldsDelivery(false); };
+    return CocoaCurlDownloadTransfer { std::exchange(m_connection, nullptr), m_pool.copyRef(), m_storage, m_request, m_connectionURL, m_response, WTF::move(completion), std::exchange(m_sniffed, { }), m_generatedCookie, m_allowCredentials, m_result };
 }
 }

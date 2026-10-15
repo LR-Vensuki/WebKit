@@ -157,10 +157,20 @@ NetworkDataTaskCurlCocoa::~NetworkDataTaskCurlCocoa()
 
 
 
+// A Safari 7 extension page is a tab's top-level safari-extension: document, and its loads relax
+// third-party cookie blocking as the pages upstream gives a WebExtension do
+// (WebExtensionContext::webViewConfiguration).
+static ShouldRelaxThirdPartyCookieBlocking shouldRelaxThirdPartyCookieBlocking(NetworkSession& session, const ResourceRequest& request, std::optional<WebPageProxyIdentifier> webPageProxyID)
+{
+    if (request.firstPartyForCookies().protocolIs("safari-extension"_s))
+        return ShouldRelaxThirdPartyCookieBlocking::Yes;
+    return session.networkProcess().shouldRelaxThirdPartyCookieBlockingForPage(webPageProxyID);
+}
+
 static bool storageBlocksCookies(NetworkSession& session, const ResourceRequest& request, std::optional<FrameIdentifier> frameID, std::optional<PageIdentifier> pageID, std::optional<WebPageProxyIdentifier> webPageProxyID)
 {
     auto* storage = session.networkStorageSession();
-    return storage && storage->shouldBlockCookies(request, frameID, pageID, session.networkProcess().shouldRelaxThirdPartyCookieBlockingForPage(webPageProxyID), IsKnownCrossSiteTracker::No);
+    return storage && storage->shouldBlockCookies(request, frameID, pageID, shouldRelaxThirdPartyCookieBlocking(session, request, webPageProxyID), IsKnownCrossSiteTracker::No);
 }
 
 static String cookieHeaderValue(NetworkSession& session, const ResourceRequest& request, std::optional<FrameIdentifier> frameID, std::optional<PageIdentifier> pageID, std::optional<WebPageProxyIdentifier> webPageProxyID)
@@ -168,7 +178,7 @@ static String cookieHeaderValue(NetworkSession& session, const ResourceRequest& 
     auto* storage = session.networkStorageSession();
     if (!storage)
         return { };
-    return storage->cookieRequestHeaderFieldValue(request.firstPartyForCookies(), cookieRequestSameSiteInfo(request), request.url(), frameID, pageID, request.url().protocolIs("https"_s) ? IncludeSecureCookies::Yes : IncludeSecureCookies::No, ApplyTrackingPrevention::Yes, session.networkProcess().shouldRelaxThirdPartyCookieBlockingForPage(webPageProxyID), IsKnownCrossSiteTracker::No).first;
+    return storage->cookieRequestHeaderFieldValue(request.firstPartyForCookies(), cookieRequestSameSiteInfo(request), request.url(), frameID, pageID, request.url().protocolIs("https"_s) ? IncludeSecureCookies::Yes : IncludeSecureCookies::No, ApplyTrackingPrevention::Yes, shouldRelaxThirdPartyCookieBlocking(session, request, webPageProxyID), IsKnownCrossSiteTracker::No).first;
 }
 
 String NetworkDataTaskCurlCocoa::cookieHeader(NetworkSession& session, const ResourceRequest& request, std::optional<FrameIdentifier> frameID, std::optional<PageIdentifier> pageID, std::optional<WebPageProxyIdentifier> webPageProxyID, StoredCredentialsPolicy storedCredentialsPolicy, bool cookieBlockingLatched)
@@ -287,8 +297,7 @@ void NetworkDataTaskCurlCocoa::start()
 {
     if (m_state != State::Running)
         return;
-    auto* storage = m_session->networkStorageSession();
-    bool ignoreDynamicHSTS = m_storedCredentialsPolicy == StoredCredentialsPolicy::EphemeralStateless || (storage && storage->shouldBlockCookies(m_request, m_frameID, m_pageID, m_session->networkProcess().shouldRelaxThirdPartyCookieBlockingForPage(m_webPageProxyID), IsKnownCrossSiteTracker::No));
+    bool ignoreDynamicHSTS = m_storedCredentialsPolicy == StoredCredentialsPolicy::EphemeralStateless || storageBlocksCookies(*m_session, m_request, m_frameID, m_pageID, m_webPageProxyID);
     // A retargeted connection takes its server's HSTS policy without a redirect the load would report.
     if (!m_connectionURL.isNull()) {
         if (m_connectionURL.protocolIs("http"_s) && !ignoreDynamicHSTS && downcast<NetworkSessionCocoa>(*m_session).httpStrictTransportSecurityStore().shouldUpgrade(m_connectionURL)) {
@@ -767,7 +776,6 @@ void NetworkDataTaskCurlCocoa::restart(ResourceRequest&& request)
     m_finalHeaders = false;
     m_waitingForPolicy = false;
     m_useResponse = false;
-    m_pendingData = nullptr;
     m_response = { };
     m_status = 0;
     m_sniffPrefix.clear();
@@ -855,9 +863,11 @@ void NetworkDataTaskCurlCocoa::decidePolicy(PolicyAction policy)
     if (!m_isDownloadSink)
         m_multipart = createCocoaCurlMultipartHandle(*this, m_response);
     if (!m_sniffPrefix.isEmpty()) {
-        m_pendingData = SharedBuffer::create(std::exchange(m_sniffPrefix, { }));
-        RunLoop::mainSingleton().dispatch([protectedThis = Ref { *this }] {
-            protectedThis->deliverData();
+        RunLoop::mainSingleton().dispatch([protectedThis = Ref { *this }, prefix = SharedBuffer::create(std::exchange(m_sniffPrefix, { }))] {
+            if (protectedThis->m_state != State::Running)
+                return;
+            protectedThis->deliverData(prefix.get());
+            protectedThis->continueTransfer();
         });
         return;
     }
@@ -866,15 +876,14 @@ void NetworkDataTaskCurlCocoa::decidePolicy(PolicyAction policy)
 
 
 
-void NetworkDataTaskCurlCocoa::deliverData()
+void NetworkDataTaskCurlCocoa::deliverData(const SharedBuffer& data)
 {
     if (m_state != State::Running)
         return;
-    auto data = std::exchange(m_pendingData, nullptr);
-    m_metrics.responseBodyDecodedSize += data->size();
+    m_metrics.responseBodyDecodedSize += data.size();
     if (m_isDownloadSink) {
-        auto written = m_downloadFile.write(data->span());
-        if (!written || *written != data->size()) {
+        auto written = m_downloadFile.write(data.span());
+        if (!written || *written != data.size()) {
             finish(NSURLErrorCannotWriteToFile, "Could not write the download"_s);
             return;
         }
@@ -882,22 +891,20 @@ void NetworkDataTaskCurlCocoa::deliverData()
         if (auto download = m_session->networkProcess().downloadManager().download(*m_pendingDownloadID))
             download->didReceiveData(*written, m_downloadedBytes, m_downloadExpectedBytes);
     } else if (m_multipart) {
-        m_multipart->didReceiveMessage(data->span());
-        if (m_multipart->hasError()) {
+        m_multipart->didReceiveMessage(data.span());
+        if (m_multipart->hasError())
             finish(NSURLErrorCannotParseResponse, "Invalid multipart response"_s);
-            return;
-        }
     } else if (RefPtr client = m_client.get())
-        client->didReceiveData(*data);
-    else {
+        client->didReceiveData(data);
+    else
         cancel();
+}
+
+void NetworkDataTaskCurlCocoa::holdDelivery()
+{
+    if (std::exchange(m_holdsDelivery, true) || !m_transfer)
         return;
-    }
-    if (m_state != State::Running)
-        return;
-    if (m_waitingForMultipartPolicy)
-        return;
-    continueTransfer();
+    m_transfer->setHoldsDelivery(true);
 }
 
 void NetworkDataTaskCurlCocoa::didReceiveHeaderFromMultipart(Vector<String>&& fields)
@@ -918,6 +925,7 @@ void NetworkDataTaskCurlCocoa::didReceiveHeaderFromMultipart(Vector<String>&& fi
     auto contentType = response.httpHeaderField(HTTPHeaderName::ContentType);
     setCocoaCurlContentType(response, contentType);
     m_waitingForMultipartPolicy = true;
+    holdDelivery();
     // The parser enters WaitingForHeaderProcessing after returning from this callback.
     response.setDeprecatedNetworkLoadMetrics(Box<NetworkLoadMetrics>::create(m_metrics));
     RunLoop::mainSingleton().dispatch([protectedThis = Ref { *this }, response = WTF::move(response)]() mutable {
@@ -1031,7 +1039,6 @@ void NetworkDataTaskCurlCocoa::finish(int errorCode, const String& description, 
         failureDescription = "Could not flush the download destination"_s;
     }
     m_downloadFile = { };
-    m_pendingData = nullptr;
     m_metrics.responseEnd = MonotonicTime::now();
     m_metrics.markComplete();
     ResourceError error = originalError;
@@ -1069,6 +1076,7 @@ void NetworkDataTaskCurlCocoa::detachTransfer()
         transfer->invalidateClient();
     if (m_continueTransfer)
         std::exchange(m_continueTransfer, nullptr)();
+    m_holdsDelivery = false;
 }
 
 void NetworkDataTaskCurlCocoa::updateMetrics(const NetworkLoadMetrics& metrics)
@@ -1140,28 +1148,23 @@ void NetworkDataTaskCurlCocoa::curlReceivedInformationalResponse(ResourceRespons
         didReceiveInformationalResponse(WTF::move(response));
 }
 
-void NetworkDataTaskCurlCocoa::curlReceivedData(const SharedBuffer& data, CompletionHandler<void()>&& completion)
+void NetworkDataTaskCurlCocoa::curlReceivedData(const SharedBuffer& data)
 {
-    if (m_state != State::Running) {
-        completion();
+    if (m_state != State::Running)
         return;
-    }
-    ASSERT(!m_continueTransfer);
-    m_continueTransfer = WTF::move(completion);
+    ASSERT(!m_waitingForPolicy && !m_waitingForMultipartPolicy);
     if (m_responseNeedsSniff) {
         m_sniffPrefix.append(data.span());
-        if (m_sniffPrefix.size() < MIMESniffer::sniffedPrefixLength) {
-            continueTransfer();
+        if (m_sniffPrefix.size() < MIMESniffer::sniffedPrefixLength)
             return;
-        }
         m_response.setMimeType(MIMESniffer::computeHTTPMIMEType(m_sniffPrefix.span().first(MIMESniffer::sniffedPrefixLength), m_response.mimeType(), m_responseContentType, m_noSniff));
         m_responseNeedsSniff = false;
+        holdDelivery();
         publishResponse();
         return;
     }
     ASSERT(m_useResponse);
-    m_pendingData = &data;
-    deliverData();
+    deliverData(data);
 }
 
 void NetworkDataTaskCurlCocoa::curlSentData(uint64_t sent, uint64_t total)
@@ -1224,6 +1227,8 @@ void NetworkDataTaskCurlCocoa::continueTransfer()
 {
     if (m_state != State::Running || m_waitingForPolicy || m_waitingForMultipartPolicy)
         return;
+    if (std::exchange(m_holdsDelivery, false) && m_transfer)
+        m_transfer->setHoldsDelivery(false);
     if (m_continueTransfer) {
         std::exchange(m_continueTransfer, nullptr)();
         return;

@@ -50,7 +50,8 @@ endmacro()
 # PlatformMac.cmake). The binary lands in Versions/A/Daemons inside the framework, the relocatable-
 # webpushd layout, so the staging and install scripts carry it with the framework; launchd starts it
 # from the job WebKit submits when a session that uses push starts
-# (UIProcess/WebsiteData/Cocoa/WebsiteDataStoreCocoa.mm), as upstream's relocatable flavor also does.
+# (source/WebKit/UIProcess/WebsiteData/Cocoa/WebsiteDataStoreAquaWebKit.mm), as upstream's relocatable
+# flavor also does.
 macro(_AQUAWEBKIT_DEFINE_WEBPUSHD)
     if (ENABLE_WEB_PUSH_NOTIFICATIONS)
         WEBKIT_EXECUTABLE_DECLARE(webpushd)
@@ -73,6 +74,18 @@ endmacro()
 # Standalone backport blocks (targets, definitions, framework lookups, staging).
 # --------------------------------------------------------------------------
 
+# The inspector window's native dock-button images, which WebInspectorUIProxy::platformCreateFrontendWindow
+# loads from WebKit.framework's Resources.
+set(_aquawebkit_webkit_resources_dir ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/WebKit.framework/Versions/A/Resources)
+foreach (_aquawebkit_dock_image DockBottomLegacy DockRightLegacy)
+    add_custom_command(OUTPUT ${_aquawebkit_webkit_resources_dir}/${_aquawebkit_dock_image}.pdf
+        COMMAND ${CMAKE_COMMAND} -E copy ${WEBKIT_DIR}/Resources/${_aquawebkit_dock_image}.pdf ${_aquawebkit_webkit_resources_dir}/${_aquawebkit_dock_image}.pdf
+        DEPENDS ${WEBKIT_DIR}/Resources/${_aquawebkit_dock_image}.pdf
+        VERBATIM)
+    list(APPEND _aquawebkit_dock_image_files ${_aquawebkit_webkit_resources_dir}/${_aquawebkit_dock_image}.pdf)
+endforeach ()
+add_custom_target(WebKitInspectorDockImages ALL DEPENDS ${_aquawebkit_dock_image_files})
+add_dependencies(WebKit WebKitInspectorDockImages)
 
 
 # system zlib for the NetworkProcess gzip content-decoder (NetworkDataTaskCocoa.mm).
@@ -88,8 +101,11 @@ if (ENABLE_WEB_PUSH_NOTIFICATIONS)
         webpushd/ApplePushServiceConnection.mm
         webpushd/_WKMockUserNotificationCenter.mm
     )
-    # The daemon entry point is supplied by WebPushDaemonMain.mm.
+    # The daemon entry point is supplied by WebPushDaemonMain.mm; the tool's is upstream's CMake stub.
     list(REMOVE_ITEM WebKit_SOURCES "${CMAKE_BINARY_DIR}/WebKit/WebPushDaemonStubs.cpp")
+    file(CONFIGURE OUTPUT "${CMAKE_BINARY_DIR}/WebKit/WebPushToolStub.cpp" CONTENT
+"#include \"config.h\"\n#if ENABLE(WEB_PUSH_NOTIFICATIONS)\nnamespace WebKit {\nint WebPushToolMain(int, char**) { return 1; }\n}\n#endif\n")
+    list(APPEND WebKit_SOURCES "${CMAKE_BINARY_DIR}/WebKit/WebPushToolStub.cpp")
     # The two Mozilla-transport files are this backport's own, so they live beside the rest of the
     # 10.9 glue; ${AQUAWEBKIT_SUPPORT}/source mirrors the Source/ path of whatever each one plugs into.
     list(APPEND WebKit_PRIVATE_INCLUDE_DIRECTORIES "${AQUAWEBKIT_SUPPORT}/source/WebKit/webpushd")
@@ -106,15 +122,23 @@ if (ENABLE_WEB_PUSH_NOTIFICATIONS)
         webpushd/WebPushDaemon.mm
         webpushd/WebPushDaemonMain.mm
     )
-    # SMJobSubmit, which submits the daemon's launchd job from the UI process
-    # (UIProcess/WebsiteData/Cocoa/WebsiteDataStoreCocoa.mm).
+    # The UI-process half for a host that drives none of push itself: the daemon's launchd job, the
+    # drain of its queued messages and the clients.openWindow fallback. SMJobSubmit, which submits
+    # that job, is ServiceManagement's.
+    list(APPEND WebKit_SOURCES
+        ${AQUAWEBKIT_SUPPORT}/source/WebKit/UIProcess/WebsiteData/Cocoa/WebsiteDataStoreAquaWebKit.mm
+    )
     target_link_options(WebKit PRIVATE "SHELL:-framework ServiceManagement")
+    # WebPushDaemonMain.mm imports <WebKit/Logging.h>, a project header. Xcode's own-target header map
+    # answers that name for every header of the target; the project header map does the same here.
+    list(APPEND WebKit_PROJECT_HEADERS Platform/Logging.h)
 endif ()
 
 # the UIProcess and injected-bundle sources this backport wrote itself, kept with
 # the rest of the 10.9 glue -- ${AQUAWEBKIT_SUPPORT}/source mirrors the Source/ path each one plugs
 # into. WKViewAquaWebKit.mm carries the only @implementation WKView on this port and WKViewToolTip.mm
-# its title-attribute tooltip; both compile standalone. Sources that ride in a unified bundle stay in
+# its title-attribute tooltip; WebPageProxyMacAquaWebKit.mm holds the WebPageProxy members this port
+# adds on the Mac. All compile standalone. Sources that ride in a unified bundle stay in
 # Source/ -- their position in the list decides which files share a
 # unified bundle, so relocating them would move every file after them into a different bundle.
 list(APPEND WebKit_PRIVATE_INCLUDE_DIRECTORIES
@@ -122,15 +146,19 @@ list(APPEND WebKit_PRIVATE_INCLUDE_DIRECTORIES
     "${AQUAWEBKIT_SUPPORT}/source/WebKit/WebProcess/InjectedBundle"
 )
 list(APPEND WebKit_SOURCES
+    ${AQUAWEBKIT_SUPPORT}/source/WebKit/UIProcess/API/Cocoa/_WKTextExtractionItems.mm
     ${AQUAWEBKIT_SUPPORT}/source/WebKit/UIProcess/API/mac/WKViewAquaWebKit.mm
     ${AQUAWEBKIT_SUPPORT}/source/WebKit/UIProcess/API/mac/WKViewToolTip.mm
+    ${AQUAWEBKIT_SUPPORT}/source/WebKit/UIProcess/Automation/BidiBrowserAgentAquaWebKit.cpp
     ${AQUAWEBKIT_SUPPORT}/source/WebKit/UIProcess/mac/AquaWebKitPageClient.mm
+    ${AQUAWEBKIT_SUPPORT}/source/WebKit/UIProcess/mac/WebPageProxyMacAquaWebKit.mm
     ${AQUAWEBKIT_SUPPORT}/source/WebKit/WebProcess/InjectedBundle/Safari7StandardWorldBindings.cpp
 )
 
 # The `browser` namespace WebKit gives Safari 7 legacy extensions: LegacyExtensionAPI.js, the UI-process
 # router (LegacyExtensionHost), and its web-content (LegacyExtensionContent) and network-process
-# (LegacyExtensionNetwork) ends. Their message receivers are generated from DerivedSources copies of the
+# (LegacyExtensionNetwork) ends, with the webRequest of the Safari process's WebKit 1 extension views
+# (LegacyExtensionViewNetwork). Their message receivers are generated from DerivedSources copies of the
 # .messages.in files, which the generator finds by bare name.
 set(AQUAWEBKIT_LEGACY_EXTENSIONS "${AQUAWEBKIT_SUPPORT}/source/WebKit")
 list(APPEND WebKit_PRIVATE_INCLUDE_DIRECTORIES
@@ -144,12 +172,22 @@ list(APPEND WebKit_SOURCES
     ${AQUAWEBKIT_LEGACY_EXTENSIONS}/Shared/LegacyExtensions/LegacyExtensionErrors.cpp
     ${AQUAWEBKIT_LEGACY_EXTENSIONS}/Shared/LegacyExtensions/LegacyExtensionJavaScript.cpp
     ${AQUAWEBKIT_LEGACY_EXTENSIONS}/Shared/LegacyExtensions/LegacyExtensionScheme.cpp
+    ${AQUAWEBKIT_LEGACY_EXTENSIONS}/Shared/LegacyExtensions/LegacyExtensionWebRequest.cpp
     ${AQUAWEBKIT_LEGACY_EXTENSIONS}/Shared/LegacyExtensions/LegacyExtensionWebsiteAccess.cpp
     ${AQUAWEBKIT_LEGACY_EXTENSIONS}/UIProcess/LegacyExtensions/LegacyExtensionClipboard.mm
+    ${AQUAWEBKIT_LEGACY_EXTENSIONS}/UIProcess/LegacyExtensions/LegacyExtensionHiddenTabs.mm
     ${AQUAWEBKIT_LEGACY_EXTENSIONS}/UIProcess/LegacyExtensions/LegacyExtensionInfoPlist.mm
     ${AQUAWEBKIT_LEGACY_EXTENSIONS}/UIProcess/LegacyExtensions/LegacyExtensionHost.cpp
+    ${AQUAWEBKIT_LEGACY_EXTENSIONS}/UIProcess/LegacyExtensions/LegacyExtensionMimeHandlers.cpp
+    ${AQUAWEBKIT_LEGACY_EXTENSIONS}/UIProcess/LegacyExtensions/LegacyExtensionPrivacy.cpp
+    ${AQUAWEBKIT_LEGACY_EXTENSIONS}/UIProcess/LegacyExtensions/LegacyExtensionViewNetwork.cpp
     ${AQUAWEBKIT_LEGACY_EXTENSIONS}/WebProcess/LegacyExtensions/LegacyExtensionContent.cpp
     ${AQUAWEBKIT_LEGACY_EXTENSIONS}/NetworkProcess/LegacyExtensions/LegacyExtensionNetwork.cpp
+    ${AQUAWEBKIT_LEGACY_EXTENSIONS}/NetworkProcess/LegacyExtensions/LegacyExtensionResponseFilter.cpp
+)
+# declarativeNetRequest calls WebKit's WebExtension helpers, whose definitions are ARC's.
+list(APPEND WebKit_ARC_SOURCES
+    ${AQUAWEBKIT_LEGACY_EXTENSIONS}/UIProcess/LegacyExtensions/LegacyExtensionDeclarativeNetRequest.mm
 )
 foreach (_aquaWebKitReceiver
     UIProcess/LegacyExtensions/LegacyExtensionHost
@@ -206,6 +244,7 @@ list(APPEND WebKit_PRIVATE_INCLUDE_DIRECTORIES
     "${WEBKIT_DIR}/GPUProcess/media/cocoa"
     "${WEBKIT_DIR}/WebProcess/Plugins/PDF/UnifiedPDF"
     "${WEBKIT_DIR}/WebProcess/Extensions/Cocoa"
+    "${WEBKIT_DIR}/WebProcess/Extensions/API/Cocoa"
     "${WEBKIT_DIR}/UIProcess/Extensions/Cocoa"
     "${WEBKIT_DIR}/webpushd/webpushtool"
     "${WEBKIT_DIR}/WebKitSwift/WritingTools"
@@ -258,17 +297,28 @@ target_link_options(WebKit PRIVATE "SHELL:-weak_framework CryptoTokenKit")
 # AKAuthorizationController and AppSSO is soft-linked) and the -u reference to
 # _WebInspectorUIFrameworkLoad, which 10.9's WebInspectorUI does not export; the WebInspectorUI stub,
 # built into the library output directory, is instead a needed framework against -dead_strip_dylibs.
+# PlatformCocoa.cmake and PlatformMac.cmake each link AuthKit, so every `-framework AuthKit` pair goes.
 get_target_property(_aquawebkit_webkit_link_options WebKit LINK_OPTIONS)
-list(FIND _aquawebkit_webkit_link_options AuthKit _aquawebkit_authkit_index)
-if (_aquawebkit_authkit_index LESS 1)
+set(_aquawebkit_authkit_count 0)
+while (TRUE)
+    list(FIND _aquawebkit_webkit_link_options AuthKit _aquawebkit_authkit_index)
+    if (_aquawebkit_authkit_index EQUAL -1)
+        break ()
+    endif ()
+    if (_aquawebkit_authkit_index LESS 1)
+        message(FATAL_ERROR "WebKit's LINK_OPTIONS lead with AuthKit, not `-framework AuthKit`.")
+    endif ()
+    math(EXPR _aquawebkit_framework_index "${_aquawebkit_authkit_index} - 1")
+    list(GET _aquawebkit_webkit_link_options ${_aquawebkit_framework_index} _aquawebkit_framework_flag)
+    if (NOT _aquawebkit_framework_flag STREQUAL "-framework")
+        message(FATAL_ERROR "WebKit's LINK_OPTIONS name AuthKit after `${_aquawebkit_framework_flag}`, not `-framework`.")
+    endif ()
+    list(REMOVE_AT _aquawebkit_webkit_link_options ${_aquawebkit_framework_index} ${_aquawebkit_authkit_index})
+    math(EXPR _aquawebkit_authkit_count "${_aquawebkit_authkit_count} + 1")
+endwhile ()
+if (_aquawebkit_authkit_count EQUAL 0)
     message(FATAL_ERROR "WebKit's LINK_OPTIONS carry no `-framework AuthKit` to withhold.")
 endif ()
-math(EXPR _aquawebkit_framework_index "${_aquawebkit_authkit_index} - 1")
-list(GET _aquawebkit_webkit_link_options ${_aquawebkit_framework_index} _aquawebkit_framework_flag)
-if (NOT _aquawebkit_framework_flag STREQUAL "-framework")
-    message(FATAL_ERROR "WebKit's LINK_OPTIONS name AuthKit after `${_aquawebkit_framework_flag}`, not `-framework`.")
-endif ()
-list(REMOVE_AT _aquawebkit_webkit_link_options ${_aquawebkit_framework_index} ${_aquawebkit_authkit_index})
 list(FIND _aquawebkit_webkit_link_options "-Wl,-u,_WebInspectorUIFrameworkLoad" _aquawebkit_marker_index)
 if (_aquawebkit_marker_index EQUAL -1)
     message(FATAL_ERROR "WebKit's LINK_OPTIONS carry no -u reference to _WebInspectorUIFrameworkLoad to withhold.")
@@ -313,7 +363,7 @@ list(REMOVE_ITEM WebKit_PRIVATE_LIBRARIES
 list(REMOVE_ITEM WebKit_SOURCES
     # PlatformMac.cmake lists this file; it is not in the tree (NetworkRTCProvider is a .cpp).
     NetworkProcess/webrtc/NetworkRTCProvider.mm
-    # The Network.framework WebRTC sockets and their helpers (!HAVE(NETWORK_FRAMEWORK); see PlatformHave.h).
+    # The Network.framework WebRTC sockets and their helpers (!HAVE(NETWORK_FRAMEWORK); see AdditionalPlatformHave.h).
     # The socket pair is also in SourcesCocoa.txt and withheld there below.
     NetworkProcess/webrtc/NetworkRTCTCPSocketCocoa.mm
     NetworkProcess/webrtc/NetworkRTCUDPSocketCocoa.mm
@@ -376,8 +426,7 @@ list(APPEND WebKit_PUBLIC_FRAMEWORK_HEADERS
     UIProcess/API/Cocoa/_WKWebExtensionTabCreationOptions.h
     # the <WebKit/WebKit.h> umbrella imports these unconditionally, but they were missing
     # from the forward list, so any consumer of the umbrella (e.g. WebKitTestRunner) failed to compile. They
-    # are declaration-only public API headers; forward them so the umbrella resolves. (The WKWebExtension
-    # classes are inert at runtime since ENABLE_WK_WEB_EXTENSIONS=0, but the headers compile fine.)
+    # are declaration-only public API headers; forward them so the umbrella resolves.
     UIProcess/API/Cocoa/WKFormInfo.h
     UIProcess/API/Cocoa/WKWebExtension.h
     UIProcess/API/Cocoa/WKWebExtensionAction.h
@@ -410,6 +459,8 @@ list(APPEND WebKit_PUBLIC_FRAMEWORK_HEADERS
     UIProcess/API/Cocoa/_WKContentWorldConfiguration.h
     UIProcess/API/Cocoa/_WKTextExtraction.h
     UIProcess/API/Cocoa/_WKRectEdge.h
+    # TestWKWebView.mm imports <WebKit/_WKJSHandle.h>.
+    UIProcess/API/Cocoa/_WKJSHandle.h
     # additional Cocoa API headers reached via <WebKit/X.h> by cross-including API/private
     # headers and by WebKitTestRunner's TestRunnerWKWebView / UIScriptController. Forwarding only symlinks them;
     # they are compiled only where actually included. (The legacy WebFrame.h/WebPreferences.h/WebBackForwardList.h
@@ -483,15 +534,12 @@ set(AQUAWEBKIT_ADDED_WEBKIT_SOURCES
 # Withheld from SourcesCocoa.txt. WKWebView.mm comes back below with @no-unify; WKView.mm's place is
 # taken by WKViewAquaWebKit.mm, appended to WebKit_SOURCES near the top of this file. The rest are the
 # VideoPresentationMode, model-process, os_log streaming,
-# smart-magnification and device-orientation paths, none of which exist at this deployment target, plus
-# _WKUserContentExtensionStore/_WKUserContentFilter, which need WKContentRuleListStore's enums.
+# smart-magnification and device-orientation paths, none of which exist at this deployment target.
 set(AQUAWEBKIT_WITHHELD_WEBKIT_COCOA_SOURCES
-    # The Network.framework WebRTC path (!HAVE(NETWORK_FRAMEWORK); see PlatformHave.h).
+    # The Network.framework WebRTC path (!HAVE(NETWORK_FRAMEWORK); see AdditionalPlatformHave.h).
     "NetworkProcess/webrtc/NetworkRTCSharedMonitorCocoa.mm @nonARC"
     "NetworkProcess/webrtc/NetworkRTCTCPSocketCocoa.mm @nonARC"
     "NetworkProcess/webrtc/NetworkRTCUDPSocketCocoa.mm @nonARC"
-    "UIProcess/API/Cocoa/_WKUserContentExtensionStore.mm @nonARC"
-    "UIProcess/API/Cocoa/_WKUserContentFilter.mm @nonARC"
     "UIProcess/API/Cocoa/WKWebView.mm @nonARC"
     "UIProcess/API/mac/WKView.mm @nonARC"
     "UIProcess/Cocoa/VideoPresentationManagerProxy.mm @nonARC"
@@ -505,7 +553,7 @@ set(AQUAWEBKIT_WITHHELD_WEBKIT_COCOA_SOURCES
     "WebDeviceOrientationUpdateProviderProxyMessageReceiver.cpp"
 )
 
-# Legacy Objective-C API classes, text extraction, and standalone CoreIPC translation units.
+# Legacy Objective-C API classes and standalone CoreIPC translation units.
 set(AQUAWEBKIT_ADDED_WEBKIT_COCOA_SOURCES
     "Shared/API/Cocoa/WKTypeRefWrapper.mm @nonARC @no-unify"
     "Shared/mac/ObjCObjectGraph.mm @nonARC"
@@ -518,7 +566,6 @@ set(AQUAWEBKIT_ADDED_WEBKIT_COCOA_SOURCES
     "UIProcess/API/Cocoa/WKConnection.mm @nonARC @no-unify"
     "UIProcess/API/Cocoa/WKProcessGroup.mm @nonARC"
     "UIProcess/API/Cocoa/WKWebView.mm @nonARC @no-unify"
-    "UIProcess/API/Cocoa/_WKTextExtractionItems.mm @nonARC"
 )
 
 # GStreamer uses the fullscreen text-track path; native video presentation is disabled.

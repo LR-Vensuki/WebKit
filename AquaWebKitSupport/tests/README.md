@@ -8,9 +8,8 @@ scopes. It also checks the installed private runtime's identities and dependency
 Mail's signature quirk disabled. Attachment objects (including uppercase MIME types) and
 Web Clips must create attached native views; Flash, unknown types and lookalike types must not.
 
-`port-surface/` is not a manual page: it defines the port-surface test suite (the layout tests and
-API tests that exercise this port's own surface), run through `scripts/run-layout-tests.sh
---port-surface` and `scripts/run-api-tests.sh --port-surface`.
+`api-runner/` holds the regression tests for `scripts/run-api-tests.sh`, which use fake build products
+and run directly with the toolchain python: `api-runner-test.py`, `api-timeout-test.py` and `api-test-list.sh`.
 
 `polyfill/tests/run-behaviour-tests.sh font_collections colr_filled_paths` (under
 `AquaWebKitSupport/`) checks both font-collection loading entry points and colored glyph layers
@@ -52,11 +51,21 @@ An optional library-directory argument selects an isolated curl build for diagno
 client and runs it against a local Python fixture on 127.0.0.1:18987. A handshake followed only by the connection's
 end in the same read completes with an error and never opens. A handshake read with a text frame or a Close(1000)
 frame opens first and delivers the message or close 1000 before the end, whether the connection stays up or ends in
-that read; a close in a later read comes after the open. `websocket-auth/run.sh` runs the same polyfill
+that read; a close in a later read comes after the open. A handshake nobody answers times out after the request's
+timeoutInterval when the request set one, and after the session's timeoutIntervalForRequest otherwise. A session
+whose proxy settings name a PAC file reaches the host through the proxy that file returns, and a PAC file that never
+arrives times out the same way. A timeout of zero, a negative one or one too long for a dispatch time never fires,
+and a cancel ends a wait on a PAC file. `websocket-auth/run.sh` runs the same polyfill
 through NTLM and Negotiate against a fixture on 127.0.0.1:18986 (needs python3 with pyspnego).
 Negotiate covers password credentials, an existing ticket, cancellation, and the final server token.
+Offers of several schemes are put to the delegate strongest first with 10.9 NSURLSession's realms, and rejecting a
+protection space moves on to the next scheme.
 The runner owns a temporary Kerberos realm on 127.0.0.1:18988 and removes its processes and credentials
 after the run; it does not change the system Kerberos configuration.
+`websocket-send-completion/run.sh` builds the same polyfill against a sink on 127.0.0.1:18992. A message's send
+completion keeps pace with a reader taking 2 MB/s, and on a reader that stops reading, the messages still unwritten
+at the cancel complete once each with an error. Messages sent before the handshake completes reach the
+server after its 101, and a message sent after the client's Close fails.
 
 `external-url-rewrite/run.sh` loads `https://rewrite-source.invalid:18990/page.html` with `rewrite.c`'s
 `WKExternalURLRewrite`, which connects every load to a fixture on 127.0.0.1:18991 and edits every load's header

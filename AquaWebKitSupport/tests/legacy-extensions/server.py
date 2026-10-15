@@ -19,6 +19,10 @@ LOG = []
 LOCK = threading.Lock()
 # Held by one extension context's clipboard sequence at a time: every test extension shares the general pasteboard.
 CLIPBOARD = threading.Semaphore(1)
+# An ISO media file's leading box, which is all a media document needs to show a player for it.
+MP4 = b'\x00\x00\x00\x14ftypisom\x00\x00\x02\x00isom'
+PDF = (b'%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n'
+       b'3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n')
 
 
 def record(entry):
@@ -38,19 +42,51 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Cache-Control', 'no-store')
         super().end_headers()
 
-    def reply(self, body, content_type='text/plain', status=200, headers=()):
+    def reply(self, body, content_type='text/plain', status=200, headers=(), cors=True):
         data = body.encode() if isinstance(body, str) else body
         self.send_response(status)
         self.send_header('Content-Type', content_type)
         self.send_header('Content-Length', str(len(data)))
-        self.send_header('Access-Control-Allow-Origin', '*')
+        if cors:
+            self.send_header('Access-Control-Allow-Origin', '*')
         for name, value in headers:
             self.send_header(name, value)
         self.end_headers()
-        self.wfile.write(data)
+        if self.command != "HEAD":
+            self.wfile.write(data)
+
+    def do_HEAD(self):
+        if self.path.startswith("/quicktime-media/"):
+            return self.do_GET()
+        return super().do_HEAD()
 
     def do_GET(self):
         path = self.path
+        if path.startswith('/quicktime-media/'):
+            name = urllib.parse.urlsplit(path).path.rsplit('/', 1)[-1]
+            if not name or name in ('.', '..'):
+                return self.reply('not found', status=404)
+            filename = os.path.join(ROOT, 'build', 'quicktime-media', name)
+            try:
+                with open(filename, 'rb') as media:
+                    data = media.read()
+            except FileNotFoundError:
+                return self.reply('generate fixtures first', status=404)
+            content_type = {'.mp4': 'video/mp4', '.webm': 'video/webm', '.m3u8': 'application/vnd.apple.mpegurl', '.ts': 'video/mp2t'}.get(os.path.splitext(name)[1], 'application/octet-stream')
+            range_header = self.headers.get('Range')
+            if range_header:
+                try:
+                    if not range_header.startswith('bytes='):
+                        raise ValueError()
+                    start, end = range_header[6:].split('-')
+                    start = int(start) if start else max(0, len(data) - int(end))
+                    end = min(int(end), len(data) - 1) if range_header[6:].split('-')[0] and end else len(data) - 1
+                    if start < 0 or start > end or start >= len(data):
+                        raise ValueError()
+                except ValueError:
+                    return self.reply('', status=416, headers=[('Content-Range', 'bytes */%d' % len(data))])
+                return self.reply(data[start:end + 1], content_type, 206, [('Content-Range', 'bytes %d-%d/%d' % (start, end, len(data))), ('Accept-Ranges', 'bytes')])
+            return self.reply(data, content_type, headers=[('Accept-Ranges', 'bytes')])
         if path == '/log':
             with LOCK:
                 return self.reply(json.dumps(LOG, indent=1), 'application/json')
@@ -141,9 +177,73 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.reply('', status=302, headers=[('Location', '/res/redirect-original.json')])
         if path.startswith('/echo-headers') or path.startswith('/extension-cookies/echo'):
             return self.reply(json.dumps({k.lower(): v for k, v in self.headers.items()}), 'application/json')
+        # Top-level navigations whose download or display display-or-download.safariextension decides: /inline/ is
+        # the extension's, /plain/ is not. The PDFs need the cookie /inline/login sets and send no CORS headers.
+        # Media files download unless WebKitPlayMediaFilesInline is on, whatever their Content-Disposition.
+        if path.startswith('/inline/login'):
+            return self.reply('ok', headers=[('Set-Cookie', 'pdf=1; Path=/; Max-Age=600')])
+        if path.startswith('/inline/') or path.startswith('/plain/'):
+            name = path.split('?')[0].rsplit('/', 1)[-1]
+            if name.endswith('.mp4'):
+                headers = [('Content-Disposition', 'inline')] if name == 'server-inline.mp4' else []
+                return self.reply(MP4, 'video/mp4', headers=headers)
+            if name.endswith('.pdf'):
+                if 'pdf=1' not in (self.headers.get('Cookie') or ''):
+                    return self.reply('no cookie', status=403, cors=False)
+                return self.reply(PDF, 'application/pdf', cors=False)
+            if name.endswith('.bin'):
+                return self.reply('shown', 'application/octet-stream')
+            return self.reply('<!doctype html><title>shown</title><p id="shown">shown</p>', 'text/html')
+        # response-filter.safariextension's StreamFilters rewrite REPLACE-ME in these; /filter/plain/ has no filter.
+        # The streamed ones arrive in several writes, so in several chunks.
+        if path.startswith('/filter/') and not path.startswith('/filter/plain/'):
+            return self.filtered(path.split('?')[0].rsplit('/', 1)[-1])
+        if path.startswith('/filter/plain/'):
+            return self.reply('REPLACE-ME plain', 'text/plain')
+        if path == '/preconnects':
+            return self.reply(json.dumps(PRECONNECTS['count']), 'application/json')
+        # mime-handler.safariextension's viewer shows these PDFs; attachment.pdf downloads.
+        if path.startswith('/mime-options/'):
+            return self.reply('options', 'text/plain')
+        if path.startswith('/mime/'):
+            name = path.split('?')[0].rsplit('/', 1)[-1]
+            if name == 'embed.html':
+                return self.reply('<!doctype html><title>embeds</title>'
+                                  '<embed id="embed" src="doc.pdf" type="application/pdf" width="300" height="200">'
+                                  '<object id="object" data="doc.pdf" type="application/pdf" width="300" height="200"></object>'
+                                  '<iframe id="iframe" src="doc.pdf" width="300" height="200"></iframe>', 'text/html')
+            headers = [('Content-Disposition', 'attachment; filename="attachment.pdf"')] if name == 'attachment.pdf' else [('X-Test', 'mime')]
+            return self.reply(PDF, 'application/pdf', headers=headers)
+        # declarative-net-request.safariextension's rules act on these.
+        if path.startswith('/dnr/'):
+            return self.reply('{"path":' + json.dumps(path) + '}', 'application/json')
         if path.startswith('/sse'):
             return self.reply('data: hello\n\n', 'text/event-stream')
         return super().do_GET()
+
+    def filtered(self, name):
+        if name == 'page.html':
+            return self.reply('<!doctype html><title>filtered</title><p id="text">REPLACE-ME</p>', 'text/html; charset=utf-8')
+        if name in ('cached.txt', 'held.txt'):
+            self.cacheable = True
+            return self.reply('REPLACE-ME ' + name, 'text/plain', headers=[('Cache-Control', 'max-age=600')])
+        if name in ('chunked-count.txt', 'suspend.txt', 'disconnect.txt', 'passthrough.txt', 'slow.txt'):
+            parts = [b'REPLACE-ME first ', b'x' * 70000, b' REPLACE-ME middle ', b'y' * 70000, b' REPLACE-ME last']
+            if name == 'slow.txt':
+                parts = [b'REPLACE-ME %d ' % index + b'z' * 1024 for index in range(40)]
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain')
+            self.send_header('Content-Length', str(sum(len(part) for part in parts)))
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            for part in parts:
+                self.wfile.write(part)
+                self.wfile.flush()
+                time.sleep(0.5 if name == 'slow.txt' else 0.15)
+            return
+        if name == 'empty.txt':
+            return self.reply('', 'text/plain')
+        return self.reply('var text = "REPLACE-ME";', 'text/plain')
 
     def do_OPTIONS(self):
         record({'method': 'OPTIONS', 'path': self.path, 'authorization': self.headers.get('Authorization')})
@@ -191,7 +291,20 @@ class ThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     allow_reuse_address = True
 
 
+# Counts the connections opened to 8845, which only <link rel=preconnect> opens.
+PRECONNECTS = {'count': 0}
+
+
+class PreconnectHandler(socketserver.BaseRequestHandler):
+    def handle(self):
+        with LOCK:
+            PRECONNECTS['count'] += 1
+        time.sleep(1)
+
+
 if __name__ == '__main__':
     ws = ThreadingTCPServer(('127.0.0.1', 8844), WebSocketHandler)
     threading.Thread(target=ws.serve_forever, daemon=True).start()
+    preconnect = ThreadingTCPServer(('127.0.0.1', 8845), PreconnectHandler)
+    threading.Thread(target=preconnect.serve_forever, daemon=True).start()
     ThreadingHTTPServer(('127.0.0.1', 8843), Handler).serve_forever()

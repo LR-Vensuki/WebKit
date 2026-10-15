@@ -37,7 +37,6 @@
 #include "PlatformMediaCapabilitiesEncodingInfo.h"
 #include "PlatformMediaDecodingConfiguration.h"
 #include "PlatformMediaEncodingConfiguration.h"
-#include <algorithm> // AQUAWEBKIT: scans that codec list.
 #include <wtf/Function.h>
 
 #if ENABLE(MEDIA_SOURCE)
@@ -46,19 +45,14 @@
 
 namespace WebCore {
 
-// AQUAWEBKIT: the codec spellings GStreamerRegistryScanner registers for video/x-vp9.
-static bool isVP9Codec(const String& codec)
-{
-    return codec.startsWith("vp09"_s) || codec.startsWith("vp9"_s) || codec.startsWith("x-vp9"_s);
-}
-
 void createMediaPlayerDecodingConfigurationGStreamer(PlatformMediaDecodingConfiguration&& configuration, Function<void(PlatformMediaCapabilitiesDecodingInfo&&)>&& callback)
 {
     // AQUAWEBKIT: a configuration naming VP9 is unsupported while the VP9 decoder setting is
     // off, the rule PlatformMediaEngineConfigurationFactoryCocoa.cpp applies to the same configuration.
     if (!configuration.canExposeVP9 && configuration.video) {
         auto codecs = ContentType(configuration.video->contentType).codecs();
-        if (std::ranges::any_of(codecs, isVP9Codec)) {
+        // The codec spellings GStreamerRegistryScanner registers for video/x-vp9.
+        if (codecs.containsIf([](auto& codec) { return codec.startsWith("vp09"_s) || codec.startsWith("vp9"_s) || codec.startsWith("x-vp9"_s); })) {
             callback({{ }, WTF::move(configuration)});
             return;
         }
@@ -79,6 +73,15 @@ void createMediaPlayerDecodingConfigurationGStreamer(PlatformMediaDecodingConfig
     info.supported = lookupResult.isSupported;
     info.powerEfficient = lookupResult.isUsingHardware;
     info.smooth = lookupResult.isSupported;
+
+    // AQUAWEBKIT: AV1 decoded in software is reported not smooth, at the maintainer's direction, so
+    // a site choosing between codecs prefers a lighter one on the hardware 10.9 runs on.
+    if (configuration.video && !lookupResult.isUsingHardware) {
+        auto codecs = ContentType(configuration.video->contentType).codecs();
+        // The codec spellings GStreamerRegistryScanner registers for video/x-av1.
+        if (codecs.containsIf([](auto& codec) { return codec.startsWith("av01"_s) || codec == "av1"_s || codec == "x-av1"_s; }))
+            info.smooth = false;
+    }
 
     if (configuration.audio && configuration.audio->spatialRendering.value_or(false)) {
         auto channelCount = configuration.audio->channels.toDouble();

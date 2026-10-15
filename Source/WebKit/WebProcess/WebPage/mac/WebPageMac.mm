@@ -86,9 +86,6 @@
 #import <WebCore/ImageOverlay.h>
 #import <WebCore/ImmediateActionStage.h>
 #import <WebCore/KeyboardEvent.h>
-// AQUAWEBKIT: with -fno-modules these inline/template defs aren't transitively included here;
-// add them for LocalFrame::document()/selection() and IPC send<> (immediate action / acceptsFirstMouse).
-#import "MessageSenderInlines.h"
 #import <WebCore/LocalFrame.h>
 #import <WebCore/LocalFrameInlines.h>
 #import <WebCore/LocalFrameView.h>
@@ -289,6 +286,12 @@ static LocalFrame* NODELETE frameForEvent(KeyboardEvent* event)
     return downcast<Node>(event->target())->document().frame();
 }
 
+// AQUAWEBKIT: WKView flushes saved commands through the focused frame's editor.
+void WebPage::executeKeypressCommands(const Vector<WebCore::KeypressCommand>& commands, CompletionHandler<void(bool)>&& completionHandler)
+{
+    completionHandler(executeKeypressCommandsInternal(commands, nullptr));
+}
+
 bool WebPage::executeKeypressCommandsInternal(const Vector<WebCore::KeypressCommand>& commands, KeyboardEvent* event)
 {
     RefPtr frame = event ? frameForEvent(event) : m_page->focusController().focusedOrMainFrame();
@@ -332,7 +335,9 @@ bool WebPage::executeKeypressCommandsInternal(const Vector<WebCore::KeypressComm
             if (command.isSupported()) {
                 bool commandExecutedByEditor = command.execute(event);
                 eventWasHandled |= commandExecutedByEditor;
-                if (!commandExecutedByEditor) {
+                // AQUAWEBKIT: Non-editing keydown behavior requires the caller's keyboard event.
+                // if (!commandExecutedByEditor) {
+                if (!commandExecutedByEditor && event) {
                     bool performedNonEditingBehavior = event->underlyingPlatformEvent()->type() == PlatformEvent::Type::RawKeyDown && performNonEditingBehaviorForSelector(commands[i].commandName, event);
                     eventWasHandled |= performedNonEditingBehavior;
                 }
@@ -1046,15 +1051,10 @@ bool WebPage::shouldAvoidComputingPostLayoutDataForEditorState() const
         return false;
     }
 
-    // AQUAWEBKIT: gate the touch-bar editing-controls check on HAVE(TOUCH_BAR); the touch bar
-    // doesn't exist on 10.9 and m_requiresUserActionForEditingControlsManager is touch-bar-only state.
-#if HAVE(TOUCH_BAR)
     if (!m_requiresUserActionForEditingControlsManager || !m_userInteractionsSincePageTransition.isEmpty()) {
         // Text editing controls on the touch bar depend on having post-layout editor state data.
         return false;
     }
-    // AQUAWEBKIT: close the HAVE(TOUCH_BAR) guard around the touch-bar editing-controls check.
-#endif
 
     if (m_hasEverDisplayedContextMenu) {
         // Some context menu items (like Writing Tools) depend on having post-layout editor state data.

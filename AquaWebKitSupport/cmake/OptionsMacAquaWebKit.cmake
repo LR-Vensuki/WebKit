@@ -43,8 +43,12 @@ add_compile_definitions(USE_NSSPELLCHECKER_GRAMMAR_CHECKING_POLICY=0)
 # WebGPU's native backend requires Metal, which this deployment target does not provide.
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBGPU PRIVATE OFF)
 
-# the third-party libraries this port links that 10.9 does not supply — ICU,
-# libgcrypt/libtasn1/libgpg-error, brotli, woff2, libwebp, libxml2, and the whole GStreamer media
+# WebGL runs on ANGLE's OpenGL (CGL) backend (ANGLEPlatformAquaWebKit.cmake). ANGLE's Metal backend, and
+# the Metal shared events and devices GraphicsContextGLCocoa.mm uses with it, require Metal (10.11+).
+add_compile_definitions(WK_WEBGL_METAL_BACKEND=0)
+
+# the modern third-party libraries this port links — ICU,
+# libgcrypt/libtasn1/libgpg-error, brotli, woff2, libwebp, libxml2, SQLite, and the GStreamer media
 # runtime. AquaWebKitSupport/deps/build_deps.sh builds them all from source with the in-tree
 # toolchain into deps/build/{include,lib,bin}; AquaWebKitSupport/bootstrap.sh runs it. Every
 # reference resolves through AQUAWEBKIT_DEPS, so the artifact tree has exactly one location. Defined in
@@ -89,7 +93,13 @@ add_compile_definitions(WEBKIT_BUNDLE_VERSION="${WEBKIT_MAC_VERSION}")
 #   DNS_SERVER_FOR_TESTING        its SPI is macOS 10.15+. The _IN_NETWORKING_PROCESS companion is stated
 #                                 too: its own block keys on `defined(ENABLE_DNS_SERVER_FOR_TESTING)`
 #                                 rather than the value, which a `=0` definition satisfies.
+#   NETWORK_ISSUE_REPORTING       its reporter is libsystem_networkextension's ne_tracker_* (10.10+); 10.9
+#                                 ships no /usr/lib/system/libsystem_networkextension.dylib.
+#   CFPREFS_DIRECT_MODE           upstream pairs direct mode with _CFPrefsSetReadOnly, and 10.9's
+#                                 CoreFoundation has no read-only mode: its direct mode writes plists
+#                                 in-process. Child processes read preferences through cfprefsd.
 add_compile_definitions(
+    ENABLE_CFPREFS_DIRECT_MODE=0
     ENABLE_APPLE_PAY_AMS_UI=0
     ENABLE_IMAGE_ANALYSIS_ENHANCEMENTS=0
     ENABLE_LEGACY_PDFKIT_PLUGIN=0
@@ -98,6 +108,7 @@ add_compile_definitions(
     ENABLE_GPU_PROCESS_DOM_RENDERING_BY_DEFAULT=0
     ENABLE_DNS_SERVER_FOR_TESTING=0
     ENABLE_DNS_SERVER_FOR_TESTING_IN_NETWORKING_PROCESS=0
+    ENABLE_NETWORK_ISSUE_REPORTING=0
 )
 
 # This port's own flag, not an upstream one. The GPU process here is provisioned for rasterization and
@@ -264,12 +275,6 @@ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_NAVIGATOR_STANDALONE PRIVATE ON)
 # WebDriver, for parity with the three WEBDRIVER_*_INTERACTIONS options already restored above.
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBDRIVER_BIDI PRIVATE ON)
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBDRIVER_KEYBOARD_GRAPHEME_CLUSTERS PRIVATE ON)
-# OFF — the one hit from that sweep deliberately left off. WK_WEB_EXTENSIONS is the
-# modern WebExtensions API (WebExtensionController and a large UIProcess surface). Safari 7 predates it
-# and ships its own .safariextz extension model, which this port already supports
-# ([[aquawebkit-extensions]]); enabling a second, unreachable extension system would add a large
-# amount of code no browser on this OS can drive.
-WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WK_WEB_EXTENSIONS PRIVATE OFF)
 
 # ON — WebCodecs, matching what Apple ships (PlatformEnableCocoa.h defaults it
 # to 1 on Mac; the cmake feature default is OFF only because non-Apple ports opt in per-port).
@@ -301,7 +306,8 @@ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_PDFKIT_PLUGIN PRIVATE OFF)
 # VideoPresentationInterfaceMac, which needs VIDEO_PRESENTATION_MODE (off; see below).
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_PICTURE_IN_PICTURE_API PRIVATE OFF)
 
-# GStreamer video uses element fullscreen. Native AVKit presentation sources follow this option.
+# PIP.framework, which VideoPresentationInterfaceMac soft-links for picture-in-picture, does not exist on 10.9, and
+# video fullscreen on this port is element fullscreen. Native AVKit presentation sources follow this option.
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_VIDEO_PRESENTATION_MODE PRIVATE OFF)
 
 # AVKit playback controls require PlaybackSessionInterfaceMac and its video-presentation backend.
@@ -358,6 +364,23 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 # WebRTC and WebCodecs use the upstream AV1 codecs; their CMake targets build without Swift.
 SET_AND_EXPOSE_TO_BUILD(ENABLE_AV1 ON)
 
+# ANGLE renders through its CGL OpenGL backend (src/libANGLE/renderer/gl/cgl/*) rather than Metal, which
+# 10.9 does not have: GLES over desktop OpenGL through CGL, presenting into an IOSurface. GL.cmake reads
+# angle_enable_cgl when it composes gl_backend_sources, and Source/ThirdParty/ANGLE takes it from this
+# scope; ANGLEPlatformAquaWebKit.cmake swaps the source, definition and library lists to that backend.
+set(angle_enable_cgl TRUE)
+
+# With no Swift-backed feature enabled (ENABLE_BACK_FORWARD_LIST_SWIFT is off above), nothing compiles
+# Swift: SWIFT_REQUIRED keeps the answer WEBKIT_OPTION_END gives, and the Swift runtime OptionsCocoa.cmake
+# links into every target comes off the link line.
+if (NOT ENABLE_SWIFT_DEMO_URI_SCHEME AND NOT ENABLE_BACK_FORWARD_LIST_SWIFT)
+    set(SWIFT_REQUIRED OFF)
+    get_property(_aquaWebKitLinkLibraries DIRECTORY PROPERTY LINK_LIBRARIES)
+    list(REMOVE_ITEM _aquaWebKitLinkLibraries "${SWIFTCORE_LIBRARY}")
+    set_property(DIRECTORY PROPERTY LINK_LIBRARIES "${_aquaWebKitLinkLibraries}")
+    unset(_aquaWebKitLinkLibraries)
+endif ()
+
 
 # WebRTC is libwebrtc (ThirdParty/libwebrtc, gated on USE_LIBWEBRTC in Source/CMakeLists.txt) with
 # Apple's Cocoa glue (LibWebRTCProviderCocoa, the VideoToolbox WK_RTCVideo* codec factories, Cocoa
@@ -371,7 +394,7 @@ SET_AND_EXPOSE_TO_BUILD(USE_GCRYPT TRUE)
 
 
 # HTML5 <video>/<audio> via the upstream GStreamer media player instead of the
-# custom AVAssetReader pump (AVPlayer is dead on 10.9). GStreamer 1.28.5 comes from deps/build,
+# custom AVAssetReader pump (AVPlayer is dead on 10.9). GStreamer 1.28.7 comes from deps/build,
 # built for 10.9 with no symbol shims. Use the
 # software/appsink path: GL + TextureMapper + CoordinatedGraphics OFF; decoded frames reach CG via
 # ImageGStreamerCG.cpp. OptionsMacGStreamer.cmake defines the GLib::* targets + GSTREAMER_* vars from
@@ -395,6 +418,11 @@ SET_AND_EXPOSE_TO_BUILD(USE_COORDINATED_GRAPHICS FALSE)
 # TLS here is BoringSSL on every OS, so the default TLS 1.2 floor upstream enables at a 26.0 deployment target holds on this port too.
 SET_AND_EXPOSE_TO_BUILD(ENABLE_TLS_1_2_DEFAULT_MINIMUM TRUE)
 include("${CMAKE_SOURCE_DIR}/AquaWebKitSupport/cmake/OptionsMacGStreamer.cmake")
+
+# SQLite supplies WebCore's TRUNCATE checkpoints and 64-bit blob bindings from one shared library.
+set_target_properties(SQLite::SQLite3 PROPERTIES
+    IMPORTED_LOCATION "${AQUAWEBKIT_DEPS}/lib/libsqlite3.dylib"
+    INTERFACE_INCLUDE_DIRECTORIES "${AQUAWEBKIT_DEPS}/include")
 
 # The libxml2 2.13 from deps/build (@rpath install name, shipped alongside GStreamer) instead of the
 # SDK tbd, which binds /usr/lib/libxml2.2.dylib — libxml2 2.9.0 on 10.9, whose __xmlRaiseError crashes

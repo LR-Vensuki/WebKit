@@ -273,11 +273,7 @@ static void *wkResolveAVCapturePhotoOutput(void)
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         Class stillImageOutput = NSClassFromString(@"AVCaptureStillImageOutput");
-        if (!stillImageOutput)
-            return;     // AVFoundation is not in this process, so nothing can be asking for a capture
         Class cls = objc_allocateClassPair(stillImageOutput, "WKPolyfillPriv_AVCapturePhotoOutput", 0);
-        if (!cls)
-            return;
         // class_addMethod's prototype takes IMP, so the method implementation reaches it through the
         // cast the runtime's own headers require; the diagnostic stays armed everywhere else.
 #pragma clang diagnostic push
@@ -344,6 +340,14 @@ static NSString *wkNormalizedSpeechLanguage(NSString *locale)
     return [locale stringByReplacingOccurrencesOfString:@"_" withString:@"-"];
 }
 
+extern CFArrayRef CopySpeechSynthesisVoicesForMode(CFArrayRef modes);
+
+static NSArray *wkSpeechVoiceIdentifiers(void)
+{
+    // SpeechSynthesis exposes the installed default and compact voice groups on 10.9.
+    return [(NSArray *)CopySpeechSynthesisVoicesForMode((CFArrayRef)@[ @"VoiceGroupDefault", @"VoiceGroupCompact" ]) autorelease];
+}
+
 @implementation AVSpeechSynthesisVoice {
     NSString *_identifier;
     NSString *_name;
@@ -389,7 +393,7 @@ static NSString *wkNormalizedSpeechLanguage(NSString *locale)
 + (NSArray *)speechVoices
 {
     NSMutableArray *voices = [NSMutableArray array];
-    for (NSString *nsVoiceName in [NSSpeechSynthesizer availableVoices]) {
+    for (NSString *nsVoiceName in wkSpeechVoiceIdentifiers()) {
         AVSpeechSynthesisVoice *voice = [self voiceForNSVoiceName:nsVoiceName];
         if (voice)
             [voices addObject:voice];
@@ -397,8 +401,7 @@ static NSString *wkNormalizedSpeechLanguage(NSString *locale)
     return voices;
 }
 
-// The "super compact" tier is an iOS voice-asset distinction; 10.9 ships one tier, so the two lists
-// are the same list.
+// Both lists contain 10.9's installed default and compact voices.
 + (NSArray *)speechVoicesIncludingSuperCompact
 {
     return [self speechVoices];
@@ -421,7 +424,7 @@ static NSString *wkNormalizedSpeechLanguage(NSString *locale)
     NSString *target = [wkNormalizedSpeechLanguage(language) lowercaseString];
     NSString *targetPrefix = [[target componentsSeparatedByString:@"-"] firstObject];
     AVSpeechSynthesisVoice *prefixMatch = nil;
-    for (NSString *nsVoiceName in [NSSpeechSynthesizer availableVoices]) {
+    for (NSString *nsVoiceName in wkSpeechVoiceIdentifiers()) {
         AVSpeechSynthesisVoice *voice = [self voiceForNSVoiceName:nsVoiceName];
         NSString *voiceLanguage = [voice.language lowercaseString];
         if ([voiceLanguage isEqualToString:target])

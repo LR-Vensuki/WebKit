@@ -270,6 +270,7 @@
 #include <WebCore/JSDOMExceptionHandling.h>
 #include <WebCore/JSNode.h>
 #include <WebCore/KeyboardEvent.h>
+#include <WebCore/LegacyExtensionMimeHandlerDocument.h> // AQUAWEBKIT: Safari 7 extensions' mimeHandler viewers.
 #include <WebCore/LegacySchemeRegistry.h>
 #include <WebCore/LocalDOMWindow.h>
 #include <WebCore/LocalFrameInlines.h>
@@ -636,7 +637,7 @@ WebPage::WebPage(PageIdentifier pageID, WebPageCreationParameters&& parameters)
     , m_pageGroup(WebProcess::singleton().webPageGroup(WTF::move(parameters.pageGroupData)))
 #if ENABLE(TILED_CA_DRAWING_AREA)
     , m_drawingAreaType(parameters.drawingAreaType)
-    // AQUAWEBKIT: restore LayerHostingMode plumbing so the WebProcess honors the UI process's compositing mode (iBooks 537 dual-LayerHostingMode fix).
+    // AQUAWEBKIT: LayerHostingMode plumbing, so the WebProcess honors the UI process's compositing mode (iBooks; 537's dual LayerHostingMode).
     , m_layerHostingMode(parameters.layerHostingMode)
 #endif
     , m_alwaysShowsHorizontalScroller { parameters.alwaysShowsHorizontalScroller }
@@ -1754,7 +1755,7 @@ void WebPage::setInjectedBundlePageLoaderClient(std::unique_ptr<API::InjectedBun
         listenForLayoutMilestones(milestones);
 }
 
-// AQUAWEBKIT: restored with InjectedBundlePagePolicyClient (upstream 9eeab8d removed both).
+// AQUAWEBKIT: see InjectedBundlePagePolicyClient.h.
 void WebPage::initializeInjectedBundlePolicyClient(WKBundlePagePolicyClientBase* client)
 {
     m_policyClient.initialize(client);
@@ -2223,7 +2224,7 @@ void WebPage::close(CompletionHandler<void()>&& completionHandler)
     m_editorClient = makeUnique<API::InjectedBundle::EditorClient>();
     m_formClient = makeUnique<API::InjectedBundle::FormClient>();
     m_loaderClient = makeUnique<API::InjectedBundle::PageLoaderClient>();
-    // AQUAWEBKIT: restored with InjectedBundlePagePolicyClient (upstream 9eeab8d).
+    // AQUAWEBKIT: see InjectedBundlePagePolicyClient.h.
     m_policyClient.initialize(nullptr);
     m_resourceLoadClient = makeUnique<API::InjectedBundle::ResourceLoadClient>();
     m_uiClient = makeUnique<API::InjectedBundle::PageUIClient>();
@@ -2477,6 +2478,8 @@ void WebPage::loadRequest(LoadParameters&& loadParameters)
     FrameLoadRequest frameLoadRequest { *localFrame, WTF::move(loadParameters.request) };
     frameLoadRequest.setShouldOpenExternalURLsPolicy(loadParameters.shouldOpenExternalURLsPolicy);
     frameLoadRequest.setShouldTreatAsContinuingLoad(loadParameters.shouldTreatAsContinuingLoad);
+    // AQUAWEBKIT: resume the source reload through WebCore's typed document-loader path.
+    frameLoadRequest.setReloadFrameLoadType(loadParameters.reloadFrameLoadType);
     frameLoadRequest.setLockHistory(loadParameters.lockHistory);
     frameLoadRequest.setLockBackForwardList(loadParameters.lockBackForwardList);
     frameLoadRequest.setClientRedirectSourceForHistory(WTF::move(loadParameters.clientRedirectSourceForHistory));
@@ -4673,8 +4676,7 @@ void WebPage::didStartPageTransition()
 #endif
     m_lastEditorStateWasContentEditable = EditorStateIsContentEditable::Unset;
 
-// AQUAWEBKIT: also gate on HAVE(TOUCH_BAR) — hasPreviouslyFocusedDueToUserInteraction is declared above under HAVE(TOUCH_BAR); keep this use in step.
-#if PLATFORM(MAC) && HAVE(TOUCH_BAR)
+#if PLATFORM(MAC)
     if (hasPreviouslyFocusedDueToUserInteraction)
         send(Messages::WebPageProxy::SetHasFocusedElementWithUserInteraction(false));
 #endif
@@ -5836,8 +5838,7 @@ void WebPage::performDragControllerAction(DragControllerAction action, const Int
 
     RefPtr localMainFrame = this->localMainFrame();
     if (!localMainFrame)
-    // AQUAWEBKIT: invoke the CompletionHandler on early-out (must always be called).
-        return completionHandler(std::nullopt, DragHandlingMethod::None, false, 0, { }, { }, std::nullopt);
+        return;
 
     DragData dragData(&selectionData, clientPosition, globalPosition, draggingSourceOperationMask, flags, anyDragDestinationAction(), m_identifier);
     switch (action) {
@@ -5869,15 +5870,13 @@ void WebPage::performDragControllerAction(std::optional<FrameIdentifier> frameID
     RefPtr frame = frameID ? WebProcess::singleton().webFrame(*frameID) : &mainWebFrame();
     if (!frame) {
         ASSERT_NOT_REACHED();
-        // AQUAWEBKIT: invoke the CompletionHandler on early-out (must always be called).
-        return completionHandler(std::nullopt, DragHandlingMethod::None, false, 0, { }, { }, std::nullopt);
+        return;
     }
 
     RefPtr localFrame = frame->coreLocalFrame();
     if (!localFrame) {
         ASSERT_NOT_REACHED();
-        // AQUAWEBKIT: invoke the CompletionHandler on early-out (must always be called).
-        return completionHandler(std::nullopt, DragHandlingMethod::None, false, 0, { }, { }, std::nullopt);
+        return;
     }
 
     switch (action) {
@@ -5896,9 +5895,6 @@ void WebPage::performDragControllerAction(std::optional<FrameIdentifier> frameID
         break;
     }
     ASSERT_NOT_REACHED();
-    // AQUAWEBKIT: invoke the CompletionHandler on the unreachable fall-through path; a bare
-    // return leaves the caller's reply waiting forever (CompletionHandler must always be called).
-    completionHandler(std::nullopt, DragHandlingMethod::None, false, 0, { }, { }, std::nullopt);
 }
 
 void WebPage::performDragOperation(std::optional<WebCore::FrameIdentifier> frameID, WebCore::DragData&& dragData, SandboxExtension::Handle&& sandboxExtensionHandle, Vector<SandboxExtension::Handle>&& sandboxExtensionsForUpload, CompletionHandler<void(DragOperationResult dragOperationResult)>&& completionHandler)
@@ -7329,8 +7325,7 @@ bool WebPage::canHandleRequest(const WebCore::ResourceRequest& request)
         return true;
 
     // AQUAWEBKIT: accept app-registered custom-protocol schemes (e.g. Safari's safari-reader://).
-    // These are served by the app via LegacyCustomProtocolManager; without this, WebCore's
-    // PolicyChecker treats the navigation as "cannot show URL" and never starts the load.
+    // These are served by the app via LegacyCustomProtocolManager.
     if (WebProcess::singleton().isURLSchemeRegisteredForCustomProtocol(request.url().protocol().toString()))
         return true;
 
@@ -8076,6 +8071,9 @@ bool WebPage::canShowMIMEType(const String& mimeType, NOESCAPE const Function<bo
         return true;
 #endif
 
+    if (LegacyExtensionMimeHandlerDocument::handles(mimeType)) // AQUAWEBKIT: a Safari 7 extension's mimeHandler viewer shows it.
+        return true;
+
     return false;
 }
 
@@ -8470,15 +8468,13 @@ void WebPage::loadAndDecodeImage(WebCore::ResourceRequest&& request, std::option
     });
 }
 
-// AQUAWEBKIT: LoadAndDecodeImage without the decode. The UI process has no loader of its own,
-// and the revived favicon store the legacy WK2 icon-database C API drives (#49) needs a site's icon
-// BYTES rather than a bitmap: it admits an icon by decoding it, and bytes this OS has no decoder for
-// (SVG above all) go to createBitmapsFromImageData, which reads SVG where BitmapImage does not. It
-// asks for those bytes when a page's own icon load was cancelled by navigating away (#112), so this
+// AQUAWEBKIT: LoadAndDecodeImage without the decode or a size limit, for the favicon store the legacy
+// WK2 icon-database C API drives (#49, #112). The store needs a site's icon BYTES rather than a bitmap:
+// it admits an icon by decoding it and rasterizes what this OS's image decoders cannot read. The load
 // takes the same document-independent path through the network process that the load above does.
-void WebPage::loadImageData(WebCore::ResourceRequest&& request, uint64_t maximumBytesFromNetwork, CompletionHandler<void(RefPtr<WebCore::SharedBuffer>&&)>&& completionHandler)
+void WebPage::loadImageData(WebCore::ResourceRequest&& request, CompletionHandler<void(RefPtr<WebCore::SharedBuffer>&&)>&& completionHandler)
 {
-    WebProcess::singleton().ensureNetworkProcessConnection().connection().sendWithAsyncReply(Messages::NetworkConnectionToWebProcess::LoadImageForDecoding(WTF::move(request), m_webPageProxyIdentifier, maximumBytesFromNetwork), [completionHandler = WTF::move(completionHandler)] (Expected<Ref<WebCore::FragmentedSharedBuffer>, WebCore::ResourceError>&& result) mutable {
+    WebProcess::singleton().ensureNetworkProcessConnection().connection().sendWithAsyncReply(Messages::NetworkConnectionToWebProcess::LoadImageForDecoding(WTF::move(request), m_webPageProxyIdentifier, std::numeric_limits<uint64_t>::max()), [completionHandler = WTF::move(completionHandler)] (Expected<Ref<WebCore::FragmentedSharedBuffer>, WebCore::ResourceError>&& result) mutable {
         if (!result)
             return completionHandler(nullptr);
         completionHandler(result.value()->makeContiguous());

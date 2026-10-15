@@ -674,13 +674,6 @@ static void populateSandboxInitializationParameters(SandboxInitializationParamet
         WTFLogAlways("%s: couldn't retrieve private temporary directory path: %d\n", getprogname(), errno);
         exitProcess(EX_NOPERM);
     }
-#if USE(GLIB)
-    // AQUAWEBKIT: GLib-based libraries keep per-user runtime files in $XDG_RUNTIME_DIR, which the
-    // GLib ports' sandbox launcher sets for each sandboxed child. ORC, GStreamer's code generator, maps its
-    // code from a file there and tries $HOME first when it is unset. This process' private temporary
-    // directory is the counterpart its profile grants.
-    setenv("XDG_RUNTIME_DIR", temporaryDirectory, 0);
-#endif
 
     String bundlePath = webKit2BundleSingleton().bundlePath;
     if (!bundlePath.startsWith("/System/Library/Frameworks"_s))
@@ -689,6 +682,9 @@ static void populateSandboxInitializationParameters(SandboxInitializationParamet
     sandboxParameters.addPathParameter("WEBKIT2_FRAMEWORK_DIR"_s, bundlePath.utf8().data());
     sandboxParameters.addConfDirectoryParameter("DARWIN_USER_TEMP_DIR"_s, _CS_DARWIN_USER_TEMP_DIR);
     sandboxParameters.addConfDirectoryParameter("DARWIN_USER_CACHE_DIR"_s, _CS_DARWIN_USER_CACHE_DIR);
+    // AQUAWEBKIT: 10.9's sandbox language has no uid filter, so com.apple.WebProcess.additions.sb reads EUID for
+    // upstream's root-only system logger grant.
+    sandboxParameters.addParameter("EUID"_s, String::number(geteuid()).utf8());
 
     std::optional<String> homeDirectory = AuxiliaryProcess::getHomeDirectory();
     RELEASE_ASSERT(homeDirectory);

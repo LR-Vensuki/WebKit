@@ -54,6 +54,7 @@
 #include <wtf/RefCounted.h>
 // AQUAWEBKIT: Cocoa presents through the shared sample-buffer layer and video manager.
 #if PLATFORM(COCOA)
+#include "ImageRotationSessionVT.h" // AQUAWEBKIT: Cocoa normalizes extracted pixels with VideoToolbox.
 #include "SampleBufferDisplayLayer.h"
 #include "VideoLayerManager.h"
 #endif
@@ -292,7 +293,7 @@ public:
         return m_quirkStates.get(owner);
     }
 
-    // AQUAWEBKIT: Adaptive manifest state takes precedence over HTTP byte-length heuristics.
+    // AQUAWEBKIT: see the definition.
     // void setLiveStream(bool isLiveStream) { m_isLiveStream = isLiveStream; }
     void setLiveStream(bool isLiveStream) const;
 
@@ -504,6 +505,13 @@ protected:
     bool m_isBeingDestroyed WTF_GUARDED_BY_LOCK(m_drawLock) { false };
 
     ImageOrientation m_videoSourceOrientation;
+#if PLATFORM(COCOA) // AQUAWEBKIT: Cocoa retains upright pixels for the current sample.
+    RefPtr<VideoFrame> uprightVideoFrame(Ref<VideoFrame>&&) WTF_REQUIRES_LOCK(m_sampleMutex);
+    RefPtr<VideoFrame> rotatedVideoFrame() WTF_REQUIRES_LOCK(m_sampleMutex);
+    std::unique_ptr<ImageRotationSessionVT> m_videoFrameRotationSession WTF_GUARDED_BY_LOCK(m_sampleMutex);
+    GRefPtr<GstSample> m_rotatedVideoFrameSample WTF_GUARDED_BY_LOCK(m_sampleMutex);
+    RefPtr<VideoFrame> m_rotatedVideoFrame WTF_GUARDED_BY_LOCK(m_sampleMutex);
+#endif
 
 #if ENABLE(ENCRYPTED_MEDIA)
     Lock m_cdmAttachmentLock;
@@ -527,7 +535,10 @@ protected:
 #endif
 #if PLATFORM(COCOA) && ENABLE(DATACUE_VALUE)
     std::unique_ptr<HLSTimedMetadataGStreamer> m_hlsTimedMetadata; // AQUAWEBKIT: see handleHLSID3Sample().
-#endif // AQUAWEBKIT: closes the member above.
+    // AQUAWEBKIT: the ID3 metadata streams of the stream collection, which every SELECT_STREAMS this player sends
+    // keeps selected alongside its audio, video and text choices, as the demuxer's default selection does.
+    Vector<CString> m_id3MetadataStreamIds;
+#endif // AQUAWEBKIT: closes the members above.
 
     String errorMessage() const override { return m_errorMessage; }
 
@@ -770,6 +781,7 @@ private:
     GRefPtr<GstStreamCollection> m_streamCollection;
 
     AbortableTaskQueue m_sinkTaskQueue;
+    AbortableTaskQueue m_streamCollectionTaskQueue; // AQUAWEBKIT: see handleStreamCollectionMessage().
 
     bool m_didTryToRecoverPlayingState { false };
 

@@ -4,6 +4,7 @@
 // this port hands page bytes to 10.9's ImageIO.
 #include "wk_font_image.h"
 #include "wk_polyfill.h"
+#include "wk_icc.h"
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <jpeglib.h>
@@ -34,8 +35,9 @@ static CGColorSpaceRef wk_fontImageColorSpace(const uint8_t *profile, size_t pro
     if (profile && profileLength) {
         CFDataRef data = CFDataCreate(kCFAllocatorDefault, (const UInt8 *)profile, (CFIndex)profileLength);
         if (data) {
-            CGColorSpaceRef space = WK_SYSTEM(CGColorSpaceCreateWithICCData)
-                ? WK_SYSTEM(CGColorSpaceCreateWithICCData)(data) : NULL;
+            CFDataRef repaired = wk_iccProfileForColorSync(data);
+            CGColorSpaceRef space = WK_SYSTEM(CGColorSpaceCreateWithICCData)(repaired);
+            CFRelease(repaired);
             CFRelease(data);
             if (space) {
                 if (CGColorSpaceGetNumberOfComponents(space) == 3)

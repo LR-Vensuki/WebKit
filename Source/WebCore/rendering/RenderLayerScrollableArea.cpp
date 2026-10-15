@@ -400,6 +400,7 @@ void RenderLayerScrollableArea::scrollTo(const ScrollPosition& position)
         }
 
         // Update regions, scrolling may change the clip of a particular region.
+        // protect(renderer.document())->invalidateRenderingDependentRegions();
         protect(renderer.document())->invalidateRenderingDependentRegions(Document::AnnotationsAction::Update); // AQUAWEBKIT: a scroll changes a Dashboard region's clip, so this path recollects them.
         DebugPageOverlays::didLayout(protect(renderer.frame()));
     }
@@ -1325,8 +1326,15 @@ std::optional<ScrollbarUpdateScope> RenderLayerScrollableArea::updateScrollInfoA
         auto scrollOffset = this->scrollOffset();
         if (scrollOffset != minimumScrollOffset()) {
             auto clampedScrollOffset = clampScrollOffset(scrollOffset);
-            if (clampedScrollOffset != scrollOffset)
-                scrollToOffset(clampedScrollOffset);
+            // if (clampedScrollOffset != scrollOffset)
+            //     scrollToOffset(clampedScrollOffset);
+            if (clampedScrollOffset != scrollOffset) {
+                // AQUAWEBKIT: see LocalFrameViewLayoutContext::deferScrollClamp().
+                if (box->document().isInStyleInterleavedLayout())
+                    box->view().frameView().layoutContext().deferScrollClamp(*box);
+                else
+                    scrollToOffset(clampedScrollOffset);
+            }
         }
     }
 
@@ -1357,6 +1365,19 @@ std::optional<ScrollbarUpdateScope> RenderLayerScrollableArea::updateScrollInfoA
     }
 
     return ScrollbarUpdateScope { *this, originalScrollPosition, autoScrollbarChanges, hasHorizontalOverflow ? HasHorizontalOverflow::Yes : HasHorizontalOverflow::No, hasVerticalOverflow ? HasVerticalOverflow::Yes : HasVerticalOverflow::No };
+}
+
+// AQUAWEBKIT: the clamp updateScrollInfoAfterLayout() makes, for a scroll clamp deferred by a style-interleaved layout.
+void RenderLayerScrollableArea::clampScrollOffsetAfterLayout()
+{
+    CheckedPtr box = m_layer.renderBox();
+    if (!box || box->isHTMLMarquee() || isRubberBandInProgress() || isUserScrollInProgress())
+        return;
+
+    auto scrollOffset = this->scrollOffset();
+    auto clampedScrollOffset = clampScrollOffset(scrollOffset);
+    if (clampedScrollOffset != scrollOffset)
+        scrollToOffset(clampedScrollOffset);
 }
 
 void RenderLayerScrollableArea::updateScrollbarSteps()

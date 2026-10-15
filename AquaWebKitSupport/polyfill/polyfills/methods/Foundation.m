@@ -186,7 +186,8 @@ static CFHTTPCookieStorageRef wk_cfCookieStorageOf(id);
 @end
 
 typedef struct OpaqueCFHTTPCookie *CFHTTPCookieRef;
-typedef CFArrayRef (*wk_cookieCopyAll)(CFHTTPCookieStorageRef);
+extern CFArrayRef CFHTTPCookieStorageCopyCookies(CFHTTPCookieStorageRef);
+extern CFStringRef CFHTTPCookieCopyDomain(CFHTTPCookieRef);
 
 @interface NSHTTPCookie (WKCFHTTPCookieBridge)
 + (NSHTTPCookie *)cookieWithCFHTTPCookie:(CFHTTPCookieRef)cookie;
@@ -194,27 +195,24 @@ typedef CFArrayRef (*wk_cookieCopyAll)(CFHTTPCookieStorageRef);
 
 // The cookies stored under any of |cookieDomains|, each Domain field compared as a whole string. The jar is
 // read whole: 10.9's per-domain query, CFHTTPCookieStorageCopyCookiesMatching, is not safe while other
-// threads use the storage. Resolved with dlsym, not declared extern: the function is in 10.9's CFNetwork but
-// not in the 26.1 SDK's stub library, so a link-time reference fails to build even though the call works.
+// threads use the storage. A cookie's Domain is read from the stored cookie, and only a cookie in
+// |cookieDomains| is wrapped.
 static NSMutableArray<NSHTTPCookie *> *wk_cookiesStoredInDomains(CFHTTPCookieStorageRef storage, NSSet<NSString *> *cookieDomains)
 {
-    static wk_cookieCopyAll copyAll;
-    static bool resolved;
-    if (!resolved) {
-        copyAll = (wk_cookieCopyAll)dlsym(RTLD_DEFAULT, "CFHTTPCookieStorageCopyCookies");
-        resolved = true;
-    }
     NSMutableArray<NSHTTPCookie *> *result = [NSMutableArray array];
-    if (!storage || !copyAll || !cookieDomains.count)
+    if (!storage || !cookieDomains.count)
         return result;
-    CFArrayRef stored = copyAll(storage);
+    CFArrayRef stored = CFHTTPCookieStorageCopyCookies(storage);
     if (!stored)
         return result;
     for (CFIndex i = 0, count = CFArrayGetCount(stored); i < count; ++i) {
-        NSHTTPCookie *cookie = [NSHTTPCookie cookieWithCFHTTPCookie:(CFHTTPCookieRef)CFArrayGetValueAtIndex(stored, i)];
-        NSString *domain = cookie.domain.lowercaseString;
+        CFHTTPCookieRef storedCookie = (CFHTTPCookieRef)CFArrayGetValueAtIndex(stored, i);
+        CFStringRef storedDomain = CFHTTPCookieCopyDomain(storedCookie);
+        NSString *domain = [(NSString *)storedDomain lowercaseString];
+        if (storedDomain)
+            CFRelease(storedDomain);
         if (domain && [cookieDomains containsObject:domain])
-            [result addObject:cookie];
+            [result addObject:[NSHTTPCookie cookieWithCFHTTPCookie:storedCookie]];
     }
     CFRelease(stored);
     return result;
@@ -261,6 +259,36 @@ typedef void (^WKCookiesRemovedHandler)(NSArray<NSHTTPCookie *> *, NSString *, b
 static NSArray *wk_cookieIndexKey(NSHTTPCookie *cookie)
 {
     return @[cookie.name, cookie.domain.lowercaseString, cookie.path, [cookie _storagePartition] ?: @""];
+}
+
+// An index over wk_cookieIndexKey. An NSArray hashes to its count, which every such key shares, so the
+// index hashes the key's components instead.
+static CFHashCode wk_cookieIndexKeyHash(const void *key)
+{
+    CFHashCode hash = 0;
+    for (id component in (NSArray *)key)
+        hash = hash * 31 + [component hash];
+    return hash;
+}
+
+// A cookie's properties, kept with the cookie: an NSHTTPCookie never changes, and a subscription compares
+// each cookie it holds against the storage on every refresh.
+static NSDictionary *wk_cookieProperties(NSHTTPCookie *cookie)
+{
+    static char key;
+    NSDictionary *properties = objc_getAssociatedObject(cookie, &key);
+    if (!properties) {
+        properties = cookie.properties;
+        objc_setAssociatedObject(cookie, &key, properties, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return properties;
+}
+
+static NSMutableDictionary *wk_cookieIndex(void)
+{
+    CFDictionaryKeyCallBacks keyCallBacks = kCFTypeDictionaryKeyCallBacks;
+    keyCallBacks.hash = wk_cookieIndexKeyHash;
+    return [(NSMutableDictionary *)CFDictionaryCreateMutable(NULL, 0, &keyCallBacks, &kCFTypeDictionaryValueCallBacks) autorelease];
 }
 
 static NSArray<NSHTTPCookie *> *wk_cookiesACandidateWouldOverlay(NSHTTPCookieStorage *, NSHTTPCookie *, NSURL *);
@@ -318,7 +346,7 @@ static void wk_watchSharedCookieJarDirectory(void)
 // The unexpired cookies stored under |cookieDomains|, each Domain string read by an exact match.
 - (NSMutableDictionary *)storage:(CFHTTPCookieStorageRef)storage visibleCookiesInDomains:(NSSet<NSString *> *)cookieDomains
 {
-    NSMutableDictionary *index = [NSMutableDictionary dictionary];
+    NSMutableDictionary *index = wk_cookieIndex();
     NSDate *now = [NSDate date];
     for (NSHTTPCookie *candidate in wk_cookiesStoredInDomains(storage, cookieDomains)) {
         NSDate *expires = candidate.expiresDate;
@@ -390,7 +418,7 @@ static void wk_watchSharedCookieJarDirectory(void)
     for (NSArray *key in current) {
         NSHTTPCookie *now = current[key];
         NSHTTPCookie *old = _visible[key];
-        if (!old || ![now.properties isEqual:old.properties])
+        if (!old || ![wk_cookieProperties(now) isEqual:wk_cookieProperties(old)])
             [added addObject:now];
         // A visible cookie overwritten by HttpOnly leaves the script-visible cookie set.
         if (old && !old.HTTPOnly && now.HTTPOnly)
@@ -434,7 +462,7 @@ static void wk_watchSharedCookieJarDirectory(void)
         }
         NSHTTPCookie *old = _visible[key];
         if (now) {
-            if (!old || ![now.properties isEqual:old.properties])
+            if (!old || ![wk_cookieProperties(now) isEqual:wk_cookieProperties(old)])
                 [added addObject:now];
             if (old && !old.HTTPOnly && now.HTTPOnly)
                 [removed addObject:old];
@@ -1396,6 +1424,24 @@ WK_POLYFILL_ADD_METHODS(NSAttributedString)
 @end
 
 // ---------------------------------------------------------------------------------------------------
+// -[NSDictionary writeToURL:error:] and -[NSArray writeToURL:error:] (10.13) serialize the collection as an
+// XML property list and write it to the URL, reporting failure through the error. The cluster's concrete
+// classes inherit them.
+static BOOL wk_writePropertyListToURL(id propertyList, NSURL *url, NSError **error)
+{
+    NSData *data = [NSPropertyListSerialization dataWithPropertyList:propertyList format:NSPropertyListXMLFormat_v1_0 options:0 error:error];
+    return data && [data writeToURL:url options:NSDataWritingAtomic error:error];
+}
+
+WK_POLYFILL_ADD_METHODS(NSDictionary)
+- (BOOL)writeToURL:(NSURL *)url error:(NSError **)error { return wk_writePropertyListToURL(self, url, error); }
+@end
+
+WK_POLYFILL_ADD_METHODS(NSArray)
+- (BOOL)writeToURL:(NSURL *)url error:(NSError **)error { return wk_writePropertyListToURL(self, url, error); }
+@end
+
+// ---------------------------------------------------------------------------------------------------
 // -[NSString containsString:] (10.10+) via the classic -rangeOfString:.
 WK_POLYFILL_ADD_METHODS(NSString)
 - (BOOL)containsString:(NSString *)str { return [self rangeOfString:str].location != NSNotFound; }
@@ -1690,7 +1736,6 @@ WK_POLYFILL_ADD_METHODS_ON(NSObject, "NSURLSessionConfiguration", "__NSCFURLSess
 - (void)set_preventsSystemHTTPProxyAuthentication:(BOOL)value { (void)value; }
 - (void)set_requiresSecureHTTPSProxyConnection:(BOOL)value { (void)value; }
 - (void)set_timingDataOptions:(NSUInteger)value { (void)value; }
-- (void)set_skipsStackTraceCapture:(BOOL)value { (void)value; }
 - (id)_sourceApplicationSecondaryIdentifier { return nil; }
 - (BOOL)_allowsHSTSWithUntrustedRootCertificate { return NO; }
 - (void)set_allowsHSTSWithUntrustedRootCertificate:(BOOL)value { (void)value; }
@@ -1769,6 +1814,37 @@ WK_POLYFILL_ADD_METHODS(NSMutableURLRequest)
 // failed closed.
 WK_POLYFILL_ADD_METHODS_ON(NSURLRequest, "NSURLRequest", "NSMutableURLRequest")
 - (BOOL)_privacyProxyFailClosedForUnreachableNonMainHosts { return NO; }
+@end
+
+// -[NSURLRequest attribution] / -[NSMutableURLRequest setAttribution:] (12.0+). The value is held as an
+// NSURLProtocol property of the request, which 10.9 carries through -copy, -mutableCopy, CFURLRequest
+// copies and NSCoding archives and never sends to the server. NSURLRequestAttributionDeveloper, the
+// default, is the property's absence.
+static NSString *const wk_requestAttributionKey = @"WKURLRequestAttribution";
+
+// NSURLRequestAttribution is a 12.0+ enum in the SDK; its values are compile-time constants.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+static NSURLRequestAttribution wk_requestAttribution(NSURLRequest *request)
+{
+    id value = [NSURLProtocol propertyForKey:wk_requestAttributionKey inRequest:request];
+    return [value isKindOfClass:[NSNumber class]] ? (NSURLRequestAttribution)[value unsignedIntegerValue] : NSURLRequestAttributionDeveloper;
+}
+
+static void wk_setRequestAttribution(NSMutableURLRequest *request, NSURLRequestAttribution attribution)
+{
+    if (attribution == NSURLRequestAttributionDeveloper)
+        [NSURLProtocol removePropertyForKey:wk_requestAttributionKey inRequest:request];
+    else
+        [NSURLProtocol setProperty:@(attribution) forKey:wk_requestAttributionKey inRequest:request];
+}
+#pragma clang diagnostic pop
+
+WK_POLYFILL_ADD_METHODS_ON(NSURLRequest, "NSURLRequest", "NSMutableURLRequest")
+- (NSURLRequestAttribution)attribution { return wk_requestAttribution(self); }
+@end
+WK_POLYFILL_ADD_METHODS(NSMutableURLRequest)
+- (void)setAttribution:(NSURLRequestAttribution)attribution { wk_setRequestAttribution(self, attribution); }
 @end
 
 // NSHTTPCookieStorage.
@@ -2479,8 +2555,9 @@ WK_POLYFILL_ADD_METHODS_ON(NSURLRequest, "NSURLRequest", "NSMutableURLRequest")
     [dictionary setObject:@(preventsIdleSystemSleep) forKey:@"preventsIdleSystemSleep"];
     [dictionary setObject:@((unsigned char)self.networkServiceType) forKey:@"networkServiceType"];
     [dictionary setObject:@((int)CFURLRequestGetRequestPriority(cfRequest)) forKey:@"requestPriority"];
+    [dictionary setObject:@((unsigned char)wk_requestAttribution(self)) forKey:@"attribution"];
 
-    BOOL isHTTP = WK_SYSTEM(_CFURLRequestGetHTTPMessage) && WK_SYSTEM(_CFURLRequestGetHTTPMessage)(cfRequest);
+    BOOL isHTTP = WK_SYSTEM(_CFURLRequestGetHTTPMessage)(cfRequest) != NULL;
     [dictionary setObject:@(isHTTP) forKey:@"isHTTP"];
     if (isHTTP) {
         NSString *method = self.HTTPMethod;
@@ -2510,7 +2587,7 @@ WK_POLYFILL_ADD_METHODS_ON(NSURLRequest, "NSURLRequest", "NSMutableURLRequest")
     if ([fallbackEncodings isKindOfClass:[NSArray class]])
         [dictionary setObject:fallbackEncodings forKey:@"contentDispositionEncodingFallbackArray"];
 
-    NSDictionary *protocolProperties = WK_SYSTEM(_CFURLRequestGetProtocolProperties) ? (NSDictionary *)WK_SYSTEM(_CFURLRequestGetProtocolProperties)(cfRequest) : nil;
+    NSDictionary *protocolProperties = (NSDictionary *)WK_SYSTEM(_CFURLRequestGetProtocolProperties)(cfRequest);
     NSString *siteForCookiesKey = @"_kCFHTTPCookiePolicyPropertySiteForCookies";
     id siteForCookies = [protocolProperties objectForKey:siteForCookiesKey];
     if (siteForCookies && ![siteForCookies isKindOfClass:[NSString class]]) {
@@ -2523,6 +2600,12 @@ WK_POLYFILL_ADD_METHODS_ON(NSURLRequest, "NSURLRequest", "NSMutableURLRequest")
         else
             [normalized removeObjectForKey:siteForCookiesKey];
         protocolProperties = normalized;
+    }
+    // The attribution travels as the dictionary's own "attribution" entry.
+    if ([protocolProperties objectForKey:wk_requestAttributionKey]) {
+        NSMutableDictionary *withoutAttribution = [[protocolProperties mutableCopy] autorelease];
+        [withoutAttribution removeObjectForKey:wk_requestAttributionKey];
+        protocolProperties = withoutAttribution;
     }
     if (protocolProperties.count)
         [dictionary setObject:[[protocolProperties copy] autorelease] forKey:@"protocolProperties"];
@@ -2609,6 +2692,8 @@ WK_POLYFILL_ADD_METHODS_ON(NSURLRequest, "NSURLRequest", "NSMutableURLRequest")
         }
         _CFURLRequestSetProtocolProperty(cfRequest, (CFStringRef)key, (CFTypeRef)property);
     }
+    NSNumber *attribution = wk_valueOfClass(dictionary, @"attribution", [NSNumber class]);
+    wk_setRequestAttribution(request, [attribution unsignedCharValue]);
 
     NSNumber *explicitFlags = wk_valueOfClass(dictionary, @"explicitFlags", [NSNumber class]);
     if (explicitFlags)

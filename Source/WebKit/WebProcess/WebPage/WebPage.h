@@ -30,7 +30,7 @@
 #include "MessageSender.h"
 #include "RemoteSnapshotIdentifier.h"
 #include "SandboxExtension.h"
-// AQUAWEBKIT: restored with InjectedBundlePagePolicyClient (upstream 9eeab8d removed it).
+// AQUAWEBKIT: the injected-bundle page policy client Safari 7 installs (WKBundlePageSetPolicyClient).
 #include "InjectedBundlePagePolicyClient.h"
 #include <JavaScriptCore/InspectorFrontendChannel.h>
 #include <WebCore/BoxExtents.h>
@@ -836,7 +836,7 @@ public:
     void setInjectedBundleEditorClient(std::unique_ptr<API::InjectedBundle::EditorClient>&&);
     void setInjectedBundleFormClient(std::unique_ptr<API::InjectedBundle::FormClient>&&);
     void setInjectedBundlePageLoaderClient(std::unique_ptr<API::InjectedBundle::PageLoaderClient>&&);
-    // AQUAWEBKIT: restored with InjectedBundlePagePolicyClient (upstream 9eeab8d).
+    // AQUAWEBKIT: see InjectedBundlePagePolicyClient.h.
     void initializeInjectedBundlePolicyClient(WKBundlePagePolicyClientBase*);
     void setInjectedBundleResourceLoadClient(std::unique_ptr<API::InjectedBundle::ResourceLoadClient>&&);
     void setInjectedBundleUIClient(std::unique_ptr<API::InjectedBundle::PageUIClient>&&);
@@ -847,7 +847,7 @@ public:
     API::InjectedBundle::EditorClient& injectedBundleEditorClient() LIFETIME_BOUND { return *m_editorClient; }
     API::InjectedBundle::FormClient& injectedBundleFormClient() LIFETIME_BOUND { return *m_formClient; }
     API::InjectedBundle::PageLoaderClient& injectedBundleLoaderClient() LIFETIME_BOUND { return *m_loaderClient; }
-    // AQUAWEBKIT: restored with InjectedBundlePagePolicyClient (upstream 9eeab8d).
+    // AQUAWEBKIT: see InjectedBundlePagePolicyClient.h.
     InjectedBundlePagePolicyClient& injectedBundlePolicyClient() LIFETIME_BOUND { return m_policyClient; }
     API::InjectedBundle::ResourceLoadClient& injectedBundleResourceLoadClient() LIFETIME_BOUND { return *m_resourceLoadClient; }
     API::InjectedBundle::PageUIClient& injectedBundleUIClient() LIFETIME_BOUND { return *m_uiClient; }
@@ -1398,6 +1398,7 @@ public:
 #endif // PLATFORM(COCOA)
 
 #if PLATFORM(MAC)
+    void executeKeypressCommands(const Vector<WebCore::KeypressCommand>&, CompletionHandler<void(bool)>&&); // AQUAWEBKIT: WKView waits for saved keypress commands to execute.
     void setCaretAnimatorType(WebCore::CaretAnimatorType);
     void setCaretBlinkingSuspended(bool);
     void attributedSubstringForCharacterRangeAsync(const EditingRange&, CompletionHandler<void(const WebCore::AttributedString&, const EditingRange&)>&&);
@@ -1793,7 +1794,7 @@ public:
 
     void loadAndDecodeImage(WebCore::ResourceRequest&&, std::optional<WebCore::FloatSize> sizeConstraint, uint64_t, CompletionHandler<void(Expected<Ref<WebCore::ShareableBitmap>, WebCore::ResourceError>&&)>&&);
     // AQUAWEBKIT: the same load without the decode, for the UI process's favicon store (#112).
-    void loadImageData(WebCore::ResourceRequest&&, uint64_t maximumBytesFromNetwork, CompletionHandler<void(RefPtr<WebCore::SharedBuffer>&&)>&&);
+    void loadImageData(WebCore::ResourceRequest&&, CompletionHandler<void(RefPtr<WebCore::SharedBuffer>&&)>&&);
 #if PLATFORM(COCOA)
     void getInformationFromImageData(const Vector<uint8_t>&, CompletionHandler<void(Expected<std::pair<String, Vector<WebCore::IntSize>>, WebCore::ImageDecodingError>&&)>&&);
     void getImageMetadata(const Vector<uint8_t>&, CompletionHandler<void(Expected<Vector<std::pair<String, float>>, WebCore::ImageDecodingError>&&)>&&);
@@ -2961,7 +2962,7 @@ private:
     std::unique_ptr<API::InjectedBundle::EditorClient> m_editorClient;
     std::unique_ptr<API::InjectedBundle::FormClient> m_formClient;
     std::unique_ptr<API::InjectedBundle::PageLoaderClient> m_loaderClient;
-    // AQUAWEBKIT: restored with InjectedBundlePagePolicyClient (upstream 9eeab8d).
+    // AQUAWEBKIT: see InjectedBundlePagePolicyClient.h.
     InjectedBundlePagePolicyClient m_policyClient;
     std::unique_ptr<API::InjectedBundle::ResourceLoadClient> m_resourceLoadClient;
     std::unique_ptr<API::InjectedBundle::PageUIClient> m_uiClient;

@@ -698,15 +698,7 @@ void NetworkConnectionToWebProcess::terminateForInvalidLoaderResumeClaim()
 
 void NetworkConnectionToWebProcess::performSynchronousLoad(NetworkResourceLoadParameters&& loadParameters, CompletionHandler<void(const ResourceError&, const ResourceResponse, Vector<uint8_t>&&)>&& reply)
 {
-    // AQUAWEBKIT: answer this the way every sibling handler answers the same verdict. The property
-    // the verdict carries is Terminate: a WebProcess claiming a first party it never navigated to.
-    // Disallow is the benign half -- allowsFirstPartyForCookies returns it for a host-less first party,
-    // which every page has while it sits on its initial about:blank document, and scheduleResourceLoad,
-    // cookiesForDOM, setCookiesFromDOM and getRawCookies all proceed on it. Requiring Allow here alone
-    // makes a synchronous XMLHttpRequest issued by script in a still-blank popup (PayPal's checkout popup
-    // evaluates one into the window it opens) kill the WebProcess hosting the popup and its opener both.
-    // MESSAGE_CHECK(m_networkProcess->allowsFirstPartyForCookies(m_webProcessIdentifier, loadParameters.request.firstPartyForCookies()) == NetworkProcess::AllowCookieAccess::Allow);
-    MESSAGE_CHECK(m_networkProcess->allowsFirstPartyForCookies(m_webProcessIdentifier, loadParameters.request.firstPartyForCookies()) != NetworkProcess::AllowCookieAccess::Terminate);
+    MESSAGE_CHECK(m_networkProcess->allowsFirstPartyForCookies(m_webProcessIdentifier, loadParameters.request.firstPartyForCookies()) == NetworkProcess::AllowCookieAccess::Allow);
     if (!m_networkProcess->allowsWebPageProxyIdentifier(m_webProcessIdentifier, loadParameters.webPageProxyID)) {
         RELEASE_LOG_ERROR(Loading, "performSynchronousLoad: dropping load from process %" PRIu64 " for pageID not in allow-list", m_webProcessIdentifier.toUInt64());
         return reply({ }, { }, { });
@@ -718,6 +710,7 @@ void NetworkConnectionToWebProcess::performSynchronousLoad(NetworkResourceLoadPa
     RELEASE_ASSERT(RunLoop::isMain());
     ASSERT(!m_networkResourceLoaders.contains(*identifier));
 
+    reply = LegacyExtensionNetwork::singleton().filterSynchronousReply(*this, *identifier, WTF::move(reply)); // AQUAWEBKIT: a Safari 7 extension's StreamFilters take the body the reply carries.
     auto loader = NetworkResourceLoader::create(WTF::move(loadParameters), *this, WTF::move(reply));
     m_networkResourceLoaders.add(*identifier, loader.copyRef());
     loader->start();
@@ -790,6 +783,8 @@ void NetworkConnectionToWebProcess::browsingContextRemoved(WebPageProxyIdentifie
 
 void NetworkConnectionToWebProcess::prefetchDNS(const String& hostname)
 {
+    if (!LegacyExtensionNetwork::singleton().allowsNetworkPrediction()) // AQUAWEBKIT: a Safari 7 extension's privacy.network.networkPredictionEnabled.
+        return;
     if (CheckedPtr networkSession = this->networkSession(); networkSession && networkSession->canPrefetchDNS())
         WebCore::prefetchDNS(hostname);
 }
@@ -840,7 +835,8 @@ void NetworkConnectionToWebProcess::preconnectTo(PreconnectRequest&& preconnectR
 
 #if ENABLE(SERVER_PRECONNECT)
     CheckedPtr session = networkSession();
-    if (session && session->allowsServerPreconnect()) {
+    // if (session && session->allowsServerPreconnect()) {
+    if (session && session->allowsServerPreconnect() && LegacyExtensionNetwork::singleton().allowsNetworkPrediction()) { // AQUAWEBKIT: a Safari 7 extension's privacy.network.networkPredictionEnabled.
         NetworkLoadParameters parameters;
         parameters.webPageProxyID = preconnectRequest.webPageProxyID;
         parameters.webPageID = preconnectRequest.webPageID;

@@ -1,15 +1,11 @@
 // Classic Safari 7 / Mavericks HTML5 media controls.
 //
-// AQUAWEBKIT (#68): restored verbatim from upstream WebKit d55388c (the mediaControlsApple.js
-// that shipped in Safari 7.0.x) so embedded <audio>/<video> without site-provided controls render the
-// era-correct Aqua UI instead of the flat modern-media-controls WebKit adopted later. The only changes
-// from the upstream original are tagged AQUAWEBKIT inline and adapt the 2013 code to modern
-// WebKit: the shadow-part content attribute was renamed `pseudo` -> `useragentpart`; the per-part
-// pseudo-elements were renamed `-webkit-media-controls-*` -> `-internal-media-controls-*` (modern
-// WebKit directs UA-only pseudo-elements to the `-internal-` prefix; the root `-webkit-media-controls`
-// keeps its name); HTMLMediaElement.webkitHasClosedCaptions was removed (caption presence is derived
-// from textTracks); and the controls script now hands its controller to the host via
-// `host.controller = ...` rather than through createControls()'s return value.
+// AQUAWEBKIT (#68): upstream WebKit d55388c's mediaControlsApple.js (Safari 7.0.x), the Aqua controls
+// for embedded <audio>/<video> without site-provided controls. Its differences from that revision are
+// tagged AQUAWEBKIT inline: the shadow-part content attribute is `useragentpart`; the per-part
+// pseudo-elements are `-internal-media-controls-*` (WebKit gives UA-only pseudo-elements the
+// `-internal-` prefix; the root `-webkit-media-controls` keeps its name); caption presence comes from
+// textTracks; and the script hands its controller to the host as `host.controller`.
 
 function createControls(root, video, host)
 {
@@ -190,7 +186,8 @@ Controller.prototype = {
 
     addVideoListeners: function()
     {
-        for (name in this.HandledVideoEvents) {
+        // for (name in this.HandledVideoEvents) {
+        for (var name in this.HandledVideoEvents) { // AQUAWEBKIT: var scopes the key to this function, as upstream 5b3d36b does.
             this.listenFor(this.video, name, this.HandledVideoEvents[name]);
         };
 
@@ -216,7 +213,8 @@ Controller.prototype = {
 
     removeVideoListeners: function()
     {
-        for (name in this.HandledVideoEvents) {
+        // for (name in this.HandledVideoEvents) {
+        for (var name in this.HandledVideoEvents) { // AQUAWEBKIT: var scopes the key to this function, as upstream 5b3d36b does.
             this.stopListeningFor(this.video, name, this.HandledVideoEvents[name]);
         };
 
@@ -439,7 +437,8 @@ Controller.prototype = {
 
     disconnectControls: function(event)
     {
-        for (item in this.controls) {
+        // for (item in this.controls) {
+        for (var item in this.controls) { // AQUAWEBKIT: var scopes the key to this function, as upstream 5b3d36b does.
             var control = this.controls[item];
             if (control && control.parentNode)
                 control.parentNode.removeChild(control);
@@ -1094,8 +1093,8 @@ Controller.prototype = {
         this.controls.thumbnail.classList.add(this.ClassNames.hidden);
     },
 
-    // AQUAWEBKIT (#68): HTMLMediaElement.webkitHasClosedCaptions was removed upstream; derive
-    // caption availability from the text track list the way the modern controls do.
+    // AQUAWEBKIT (#68): caption availability comes from the text track list, as in the modern controls;
+    // HTMLMediaElement has no webkitHasClosedCaptions.
     hasClosedCaptions: function()
     {
         for (var i = 0; i < this.video.textTracks.length; ++i) {

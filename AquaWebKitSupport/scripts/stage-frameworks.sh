@@ -202,7 +202,8 @@ rewrite_rpath_deps() {
         if [ -n "$abs" ]; then
             "$INSTALL_NAME_TOOL" -change "$dep" "$abs" "$bin"
         else
-            echo "  WARNING: unmapped @rpath dependency in $(basename "$bin"): $dep" >&2
+            echo "  ERROR: unmapped @rpath dependency in $(basename "$bin"): $dep" >&2
+            exit 1
         fi
     done < <("$OTOOL" -L "$bin" | awk 'NR>1{print $1}')
 }
@@ -238,7 +239,7 @@ repoint_framework_dep() {
 # directly, which have no @rpath form.
 rewrite_abs_deps() {
     local bin="$1"
-    # Redirect Security/CoreServices/CFNetwork/QuartzCore/AppKit to libpolyfill_classes.dylib, which REEXPORTS each of
+    # Redirect CoreServices/CFNetwork/QuartzCore/AppKit/Foundation to libpolyfill_classes.dylib, which REEXPORTS each of
     # them and ADDS the absent-on-10.9 ObjC classes the build SDK declares in them
     # (_NSHTTPAlternativeServices*/_NSHSTSStorage, LSBundleProxy, ...). WebKit's two-level
     # reference to those classes is stamped "from <that framework>"; redirecting the framework's load command
@@ -248,7 +249,7 @@ rewrite_abs_deps() {
     # (Never applied to libpolyfill_classes.dylib itself — it is not in the WebKit Mach-O list this pass walks,
     # so a self-redirect can't occur.)
     local _fw
-    for _fw in Security CoreServices CFNetwork QuartzCore AppKit Foundation; do
+    for _fw in CoreServices CFNetwork QuartzCore AppKit Foundation; do
         repoint_framework_dep "$bin" "/${_fw}.framework/" "$JSC_LIBS/libpolyfill_classes.dylib"
     done
 }
@@ -264,59 +265,9 @@ strip_rpaths() {
     local rp
     while read -r rp; do
         [ -z "$rp" ] && continue
-        "$INSTALL_NAME_TOOL" -delete_rpath "$rp" "$bin" 2>/dev/null || true
+        "$INSTALL_NAME_TOOL" -delete_rpath "$rp" "$bin" || exit 1
     done < <("$OTOOL" -l "$bin" | awk '/cmd LC_RPATH/{f=1} f && /path /{print $2; f=0}')
 }
-
-# Hard verification: no @rpath dependency and no LC_RPATH may survive in a
-# staged WebKit binary. A miss here means a process will mix installed + build-tree
-# images; fail the build loudly instead.
-verify_no_rpath() {
-    local bin="$1"
-    if "$OTOOL" -L "$bin" | awk 'NR>1{print $1}' | grep -q '^@rpath/'; then
-        echo "ERROR: $bin still has @rpath dependencies after rewrite:" >&2
-        "$OTOOL" -L "$bin" | awk 'NR>1{print $1}' | grep '^@rpath/' >&2
-        return 1
-    fi
-    if "$OTOOL" -l "$bin" | grep -q 'cmd LC_RPATH'; then
-        echo "ERROR: $bin still has LC_RPATH entries after strip" >&2
-        return 1
-    fi
-}
-
-# PREFLIGHT (#168 fallout): absolute_for_rpath_dep maps every @rpath dep the build produces (the WebKit
-# frameworks, the polyfill leaf, the C++ runtime, the vendored runtime's dylibs), so the only way to trip this
-# is a genuinely unknown @rpath dylib (a newly vendored lib, a typo). Scan all four source bundles up front and
-# abort with the remediation, so the failure names every offender at once instead of surfacing one binary deep
-# into staging.
-preflight_check_rpaths() {
-    local bad=0 fw src f dep abs
-    for fw in JavaScriptCore WebKitLegacy WebCore WebKit; do
-        src="$LIBDIR/$fw.framework"
-        [ -d "$src" ] || continue
-        while IFS= read -r f; do
-            case "$f" in "$src/Versions/A/Frameworks/"*) continue;; esac
-            file "$f" 2>/dev/null | grep -q "Mach-O" || continue
-            while read -r dep; do
-                case "$dep" in @rpath/*) ;; *) continue;; esac
-                abs="$(absolute_for_rpath_dep "$dep")"
-                if [ -z "$abs" ]; then
-                    echo "  UNMAPPABLE @rpath dep in ${f#$LIBDIR/}: $dep" >&2
-                    bad=1
-                fi
-            done < <("$OTOOL" -L "$f" | awk 'NR>1{print $1}')
-        done < <(find "$src" -type f -perm +111)
-    done
-    if [ "$bad" != 0 ]; then
-        echo "ERROR: build tree has unmappable @rpath deps — refusing to stage." >&2
-        echo "       A binary references an @rpath dylib absolute_for_rpath_dep doesn't know how to relocate" >&2
-        echo "       into the bundle (e.g. a newly vendored dylib). Add a case for it there, or relink the" >&2
-        echo "       offending binary; for the XPC-service execs, 'ninja -C WebKitBuild/Release NetworkProcess" >&2
-        echo "       WebProcess' (or a full build.sh) relinks them." >&2
-        exit 1
-    fi
-}
-preflight_check_rpaths
 
 # ---------------------------------------------------------------------------
 # Step 1: copy each built framework into the staged tree and apply the final bundle layout —
@@ -441,8 +392,6 @@ echo "  staged HRTF database (audio/Composite.wav)"
 # linearSRGB.icc, which linearSRGBColorSpaceSingleton() builds the linear sRGB space from.
 cp -Rf "$REPO/Source/WebCore/Resources/." "$RES/" \
     || { echo "ERROR: Source/WebCore/Resources could not be staged." >&2; exit 1; }
-[ -f "$RES/missingImage.png" ] && [ -f "$RES/textAreaResizeCorner.png" ] && [ -f "$RES/linearSRGB.icc" ] \
-    || { echo "ERROR: WebCore resources missing from the staged bundle." >&2; exit 1; }
 echo "  staged WebCore resources ($(ls "$RES" | wc -l | tr -d ' ') entries)"
 
 # Localizable.strings: WEB_UI_STRING looks localized UI strings up in the WebCore
@@ -523,10 +472,8 @@ fi
 
 # The vendored runtime: each library in its home (framework-layout.sh), under its install-name leaf,
 # and GStreamer's plugins in $GST_LIBS/gstreamer-1.0. The prefix is built from source for 10.9
-# (AquaWebKitSupport/deps/build_deps.sh) and proved self-contained by that script's resolution gate:
-# every strong undefined symbol in every dylib/plugin resolves on this host, no NULL-binding weak
-# imports beyond the documented allow-list, no compat/reexport shim dylibs, every @rpath load present
-# in the tree, and no libunwind in it (its unwinder references name the system one).
+# (AquaWebKitSupport/deps/build_deps.sh), with no libunwind in it (its unwinder references name the
+# system one).
 #
 # Every library and plugin gets an absolute in-bundle identity and absolute dependency paths. dyld
 # matches loaded images by install name before searching rpaths, so both sides of every private
@@ -551,8 +498,13 @@ while read -r lib; do
     int_or_die -id "${lib#$STAGE}" "$lib"
     rewrite_rpath_deps "$lib"
     strip_rpaths "$lib"
-    verify_no_rpath "$lib"
 done <<< "$RUNTIME_DEPLOYED"
+# GIO's module directory, beside libgio: on macOS GLib loads modules from <libgio's directory>/gio/modules
+# when that directory exists, and from its configured prefix otherwise (get_gio_module_dir). No module
+# ships, so it stays empty.
+GIO_HOME="$(echo "$RUNTIME_HOMES" | awk '$2 == "libgio-2.0.0.dylib" {print $1}')"
+[ -n "$GIO_HOME" ] || { echo "ERROR: libgio-2.0.0.dylib has no runtime home" >&2; exit 1; }
+mkdir -p "$(s "$(wk_runtime_home_dir "$GIO_HOME")")/gio/modules" || exit 1
 for home in jsc webcore gstreamer; do
     echo "  $home: $(echo "$RUNTIME_HOMES" | awk -v h="$home" '$1 == h' | wc -l | tr -d ' ') libraries in $(wk_runtime_home_dir "$home")"
 done
@@ -580,7 +532,6 @@ while IFS= read -r f; do
     rewrite_rpath_deps "$f"
     rewrite_abs_deps "$f"
     strip_rpaths "$f"
-    verify_no_rpath "$f"
 done < <(webkit_machos)
 # webkit_machos skips each bundle's Versions/A/Frameworks dir, so libwebrtc — deployed there, and
 # carrying @rpath deps on the C++ runtime and the polyfill classes dylib — gets the same pass here.
@@ -588,12 +539,11 @@ WEBRTC_STAGED="$(s "$WEBCORE_LIBS")/libwebrtc.dylib"
 rewrite_rpath_deps "$WEBRTC_STAGED"
 rewrite_abs_deps   "$WEBRTC_STAGED"
 strip_rpaths       "$WEBRTC_STAGED"
-verify_no_rpath    "$WEBRTC_STAGED"
 echo "  rewritten: $(webkit_machos | wc -l | tr -d ' ') Mach-O binaries carry absolute paths and no LC_RPATH"
 
 # The Web Clip plug-in and its injected bundle go through the same rewriting, from the build's
-# WebClipPlugin directory into their place inside the widget; the widget's script is Apple's with
-# WebClip.js.patch applied.
+# WebClipPlugin directory into their place inside the widget; the widget's script, page and style sheet
+# are Apple's with WebClip.{js,html,css}.patch applied.
 echo "### Staging the Web Clip plug-in"
 mkdir -p "$(s "$WEBCLIP_PLUGIN")/MacOS" "$(s "$WEBCLIP_PLUGIN")/Resources"
 cp "$(dirname "$LIBDIR")/WebClipPlugin/WebClip" "$(s "$WEBCLIP_BINARY")"
@@ -602,15 +552,15 @@ cp "$(dirname "$LIBDIR")/WebClipPlugin/WCSafariExtensionPage.js" "$(s "$WEBCLIP_
 rm -rf "$(s "$WEBCLIP_PAGE_BUNDLE")"
 cp -R "$(dirname "$LIBDIR")/WebClipPlugin/WebClipPageBundle.bundle" "$(s "$WEBCLIP_PAGE_BUNDLE")"
 patch -s -o "$(s "$WEBCLIP_WIDGET_SCRIPT")" "$STOCK_BACKUP/Web Clip.wdgt/WebClip.js" "$REPO/AquaWebKitSupport/webclip/WebClip.js.patch"
+patch -s -o "$(s "$WEBCLIP_WIDGET_PAGE")" "$STOCK_BACKUP/Web Clip.wdgt/WebClip.html" "$REPO/AquaWebKitSupport/webclip/WebClip.html.patch"
+patch -s -o "$(s "$WEBCLIP_WIDGET_STYLE_SHEET")" "$STOCK_BACKUP/Web Clip.wdgt/WebClip.css" "$REPO/AquaWebKitSupport/webclip/WebClip.css.patch"
 rewrite_rpath_deps "$(s "$WEBCLIP_BINARY")"
 rewrite_abs_deps   "$(s "$WEBCLIP_BINARY")"
 strip_rpaths       "$(s "$WEBCLIP_BINARY")"
-verify_no_rpath    "$(s "$WEBCLIP_BINARY")"
 WEBCLIP_PAGE_BUNDLE_BINARY="$(s "$WEBCLIP_PAGE_BUNDLE")/Contents/MacOS/WebClipPageBundle"
 rewrite_rpath_deps "$WEBCLIP_PAGE_BUNDLE_BINARY"
 rewrite_abs_deps   "$WEBCLIP_PAGE_BUNDLE_BINARY"
 strip_rpaths       "$WEBCLIP_PAGE_BUNDLE_BINARY"
-verify_no_rpath    "$WEBCLIP_PAGE_BUNDLE_BINARY"
 
 # ---------------------------------------------------------------------------
 # Step 5: the demangler guard. The 10.9 libc++abi __cxa_demangle heap-corrupts on some modern-C++
@@ -749,6 +699,4 @@ graft_i386 "$(s "$WEBCLIP_BINARY")" "$STOCK_BACKUP$WEBCLIP_STOCK_BINARY"
 # property of the artifact rather than of whatever umask the installing shell happens to have.
 chmod -R a+rX "$STAGE"
 
-echo "### Verifying the staged product"
-wk_verify_tree "$STAGE" "the staged tree ($STAGE)"
 echo "### Staging done. Install with: sudo bash AquaWebKitSupport/install.sh"

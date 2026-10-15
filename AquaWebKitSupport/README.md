@@ -34,7 +34,8 @@ AquaWebKitSupport/
 │                               overlays Source/cmake includes (OptionsMacAquaWebKit, *PlatformAquaWebKit)
 ├── source/                     out-of-tree WebKit source the overlays add to the build (WKViewAquaWebKit.mm, webpushd, …)
 ├── webclip/                    the Dashboard Web Clip widget's plug-in (WebClip.plugin, WebKit 2 page view) and
-│                               WebClip.js.patch for the widget's script; its HTML, images and strings stay Apple's
+│                               WebClip.{js,html,css}.patch for the widget's script, page and style sheet; its
+│                               images and strings stay Apple's
 ├── scripts/                    stage-frameworks.sh (the build's last phase: assemble WebKitBuild/Release/staged),
 │                               stage-headers.sh (the developer headers and module maps, through upstream's header rules),
 │                               framework-layout.sh (sourced: the installed layout, shared by stage + install),
@@ -48,7 +49,7 @@ AquaWebKitSupport/
 │                               run-layout-tests.sh (--wk1 | --wk2), build-localized-strings.py
 ├── polyfill/                   the polyfill layer -- see polyfill/README.md
 ├── sandbox/                    the sandbox profiles 10.9's sandbox can compile, and scripts/ (check-sandbox-profiles.sh,
-│                               the build gate; check-sandbox-applied.sh; watch-sandbox-denials.sh)
+│                               run by hand; check-sandbox-applied.sh; watch-sandbox-denials.sh)
 ├── host-abi/                   the symbols 10.9 binaries bind from our frameworks (Safari 7, Safari 9, the public API,
 │                               every binary on a 10.9 system) + check-abi-gap.sh (build gate)
 ├── safari9/                    safari9.sh: points an installed Safari 9.1.3 at these frameworks (run by install.sh;
@@ -80,7 +81,7 @@ and install prefix, and that build's own ccache.
    `ibtool` runs before starting the toolchain and dependency builds.
 
 3. **Bootstrap** (once): `bash AquaWebKitSupport/bootstrap.sh` — unpacks the in-tree clang and builds
-   python3/ruby/nasm/ninja/cmake/ccache/git into `toolchain/build/`, applies the SDK patches, builds the
+   cctools/openssl/python3/ruby/nasm/ninja/cmake/ccache/git and GNU sort into `toolchain/build/`, applies the SDK patches, builds the
    third-party libraries into `deps/build/` and the polyfill archives into `polyfill/build/`. Budget
    a couple of hours for a cold run.
 
@@ -101,17 +102,20 @@ To run layout tests against the build tree (never the installed system), use
 `bash AquaWebKitSupport/scripts/run-layout-tests.sh --wk1|--wk2 <tests...>` — the port flag is
 mandatory, and the script's header lists the one-time driver-build prereqs.
 
-The port-surface suite (`tests/port-surface/`) is the set of tests whose behaviour crosses into the
-parts of this port that differ from Apple's: the 10.9 frameworks, the polyfills, the vendored
-dependencies and the process model. `run-layout-tests.sh --wk1|--wk2 --port-surface` runs its
-layout tests (`layout-tests.txt`; expectations in `LayoutTests/platform/mac-mavericks-wk1` and
-`-wk2`), and `run-api-tests.sh --port-surface` its API tests (`api-tests.txt`, which also carries
-their expectations). Selection follows feature relevance, runtime, and maintainer scope decisions,
-uniformly across passing and failing tests. The runner skips documented failures and flakiness
-in applicable TestExpectations; explicitly naming a test does not override those exclusions.
-Tests whose upstream text baselines contain FAIL lines remain selected. Each exclusion records
-its evidence; port-specific defects require fixes. Accessibility is outside the suite's scope.
-Every executed test must pass.
+This port's test suite is what its expectations do not skip, as for every port.
+`run-layout-tests.sh --wk1|--wk2` with no test paths runs the layout suite: the suites whose behaviour
+crosses into the parts of this port that differ from Apple's (the 10.9 frameworks, the polyfills, the
+vendored dependencies and the process model) plus the platform/mac tests. The block at the top of
+`LayoutTests/platform/mac-mavericks/TestExpectations` skips the rest; per-test exclusions live there and
+in `-wk1` / `-wk2`. `run-api-tests.sh` with no binary runs TestWTF, TestWebCore and TestWebKitAPI against
+upstream's `TestExpectations/apitests` and this port's `TestExpectations/platform/mac-mavericks/apitests`.
+Alongside them run `tests/cocoa-curl/run.sh` and `polyfill/tests/run-behaviour-tests.sh`. Do not overlap
+these runs with each other or with a build, and keep Safari closed during cookie tests (it shares the
+system cookie store). Each exclusion records its evidence: an upstream record for the same symptom on the
+backend whose code this port uses, a verified capability gap, or a maintainer scope decision; a
+Mavericks-only failure is a port defect to fix. A `FAIL` line in an upstream text baseline is expected
+output, not a reason to skip. Every executed test must pass; check the summary for zero unexpected
+results and no unrun tests, not just the exit status.
 
 ## Building software against the installed frameworks
 
@@ -131,6 +135,36 @@ and AppKit headers ahead of the SDK's. The headers keep Apple's availability ann
 calls warn under `-Wunguarded-availability` and link weakly. The i386 slice of every framework
 is stock 10.9's, whose API is the 10.9 SDK's.
 
+## Playing audio and video files in the tab
+
+A tab downloads an audio or video file it navigates to, whatever the server's `Content-Disposition`
+says; the same file still plays in a frame or an `<embed>`. To play such files in the tab instead:
+
+    defaults write -g WebKitPlayMediaFilesInline -bool true
+
+`-g` covers every app; an app's own domain (`defaults write com.apple.Safari …`) covers that app.
+The next navigation uses the new value. `defaults delete -g WebKitPlayMediaFilesInline` restores
+downloading.
+
+## JavaScriptCore options
+
+Every 64-bit process that runs this JavaScriptCore for an app (the app itself, including Safari's
+extension pages, and the web content, networking and GPU processes it starts) reads that app's user
+default `JSCOptions` once, as JavaScriptCore starts. It holds JavaScriptCore options as `name=value`
+pairs separated by spaces or commas, named as the `JSC_` environment variables are without the
+prefix; those variables override it. To run JavaScript without the JIT in every app:
+
+    defaults write -g JSCOptions "useJIT=false"
+
+An app's own domain covers that app, and its value replaces the global one rather than adding to it:
+
+    defaults write com.apple.Safari JSCOptions "useJIT=false"
+
+Lockdown Mode's JavaScript settings are `useJIT=false useGenerationalGC=false useConcurrentGC=false
+useLLIntICs=false useWasm=false useZombieMode=true allowDoubleShape=false alwaysHaveABadTime=true`;
+any of them can be set alone. Processes started afterwards use the new value, so quit and reopen the
+app. `defaults delete -g JSCOptions` (or the app's domain) restores the defaults.
+
 ## `polyfill/build/` contents
 
 - `libpolyfill.a` — the C functions and data constants: the libc gap-fills plus the
@@ -146,3 +180,29 @@ is stock 10.9's, whose API is the 10.9 SDK's.
 - `libwidevinegap.dylib` — installed beside Google's Widevine module by WebKit at runtime.
 
 See `polyfill/README.md` before adding a polyfill.
+
+## Widevine runtime files
+
+The first Widevine request downloads Mozilla's current stable Firefox complete MAR and the CDM
+offered by Mozilla's GMP update service for that Firefox version and build ID. Release checksums
+authenticate both downloads over HTTPS; the CDM archive also carries Google's CRX3 signature.
+Firefox's helper, launcher, XUL and their VMP signatures are extracted unchanged, alongside its
+license notices and source-release link. These Firefox binaries are read for verification.
+
+`~/Library/WebKit/WidevineCdm/<cdm-version>-<firefox-version>/` holds each complete installation.
+It contains both the official signed CDM and the compatibility-adapted executable copy. The CDM's
+`dladdr` and `proc_pidpath` imports bind to the local gap library, which supplies verification paths
+for the CDM, WebCore and the host executable. `VerifyCdmHost_0` receives all four binary/signature
+pairs before module initialization and owns the supplied file descriptors.
+
+Each process uses its cached installation immediately and checks for updates in the background.
+Firefox and CDM versions follow Mozilla automatically; downloaded updates take effect on the next
+launch. Shared file locks retain installations while UI or CDM processes use them, and unused
+generations are removed after a successful update check.
+
+`tests/widevine-image/run.sh <official-cdm.dylib> <cdm.crx3> <firefox.complete.mar>` checks adaptation,
+archive extraction, rejection of tampered CRX3 data and malformed MAR indexes, and scoped host paths.
+Use [the castLabs VMP lab](https://castlabs.github.io/wv-vmp-lab/) in Safari for the integration check:
+the license response must report `PLATFORM_SOFTWARE_VERIFIED`, and media time must advance.
+
+`extensions/SendToQuickTime.safariextension/` provides a toolbar button and video context menu for `aqua.quickTimePlayer.open`; load it with Safari 7’s Extension Builder.

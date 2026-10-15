@@ -6,11 +6,15 @@
 #if ENABLE(ENCRYPTED_MEDIA) && USE(GSTREAMER)
 
 #include "WidevineCdmLocation.h"
+#include "WidevineHostFiles.h"
 
 #include <CoreGraphics/CoreGraphics.h>
 #include <IOKit/IOKitLib.h>
+#include <cdm/content_decryption_module_ext.h>
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <pal/crypto/CryptoDigest.h>
+#include <sys/file.h>
 #include <sys/time.h>
 #include <wtf/ASCIICType.h>
 #include <wtf/FileSystem.h>
@@ -20,6 +24,7 @@
 #include <wtf/RunLoop.h>
 #include <wtf/Scope.h>
 #include <wtf/ThreadSafeRefCounted.h>
+#include <wtf/text/CString.h>
 
 namespace WebCore {
 
@@ -51,7 +56,10 @@ using CreateCdmInstanceFunction = void* (*)(int cdmInterfaceVersion, const char*
 
 struct CdmModule {
     void* handle { nullptr };
+    int leaseFD { -1 };
     CreateCdmInstanceFunction createInstance { nullptr };
+    std::array<CString, 4> verificationPaths;
+    Vector<cdm::HostFile> hostFiles;
 };
 
 // InitializeCdmModule() is per-module, so the library is loaded and initialized once
@@ -64,6 +72,15 @@ static const CdmModule& cdmModule()
         if (path.isEmpty())
             return module;
 
+        auto directory = FileSystem::parentPath(path);
+        module.leaseFD = open(FileSystem::pathByAppendingComponent(directory, ".lease"_s).utf8().data(), O_RDONLY | O_CLOEXEC);
+        if (module.leaseFD < 0 || flock(module.leaseFD, LOCK_SH | LOCK_NB)) {
+            if (module.leaseFD >= 0)
+                close(module.leaseFD);
+            module.leaseFD = -1;
+            WTFLogAlways("Widevine: cannot retain the installed generation");
+            return module;
+        }
         module.handle = dlopen(path.utf8().data(), RTLD_NOW | RTLD_LOCAL);
         if (!module.handle) {
             WTFLogAlways("Widevine: cannot load %s: %s", path.utf8().data(), dlerror());
@@ -71,8 +88,11 @@ static const CdmModule& cdmModule()
         }
 
         auto initialize = reinterpret_cast<InitializeCdmModuleFunction>(dlsym(module.handle, "InitializeCdmModule_4"));
-        module.createInstance = reinterpret_cast<CreateCdmInstanceFunction>(dlsym(module.handle, "CreateCdmInstance"));
-        if (!initialize || !module.createInstance) {
+        auto createInstance = reinterpret_cast<CreateCdmInstanceFunction>(dlsym(module.handle, "CreateCdmInstance"));
+        auto verify = reinterpret_cast<decltype(&VerifyCdmHost_0)>(dlsym(module.handle, "VerifyCdmHost_0"));
+        using SetHostPaths = int (*)(const char*, const char*, const void*, const void*);
+        auto setHostPaths = reinterpret_cast<SetHostPaths>(dlsym(module.handle, "WidevineSetHostPaths"));
+        if (!initialize || !createInstance || !verify || !setHostPaths) {
             WTFLogAlways("Widevine: %s does not export the CDM module entry points", path.utf8().data());
             dlclose(module.handle);
             module.handle = nullptr;
@@ -80,7 +100,46 @@ static const CdmModule& cdmModule()
             return module;
         }
 
+        std::array<WidevineHostFileNames, 4> names {
+            WidevineHostFileNames { widevineOriginalName, widevineSignatureName },
+            firefoxHostFiles[0], firefoxHostFiles[1], firefoxHostFiles[2]
+        };
+        Vector<int> descriptors;
+        bool transferred = false;
+        auto closeFiles = makeScopeExit([&] {
+            if (transferred)
+                return;
+            for (int descriptor : descriptors) {
+                if (descriptor >= 0)
+                    close(descriptor);
+            }
+        });
+        for (size_t i = 0; i < names.size(); ++i) {
+            module.verificationPaths[i] = FileSystem::pathByAppendingComponent(directory, names[i].image).utf8();
+            auto signature = FileSystem::pathByAppendingComponent(directory, names[i].signature).utf8();
+            int imageFD = open(module.verificationPaths[i].data(), O_RDONLY | O_CLOEXEC);
+            int signatureFD = open(signature.data(), O_RDONLY | O_CLOEXEC);
+            descriptors.append(imageFD);
+            descriptors.append(signatureFD);
+            module.hostFiles.append(cdm::HostFile { module.verificationPaths[i].data(), imageFD, signatureFD });
+            if (imageFD < 0 || signatureFD < 0) {
+                WTFLogAlways("Widevine: cannot open verification files for %s", module.verificationPaths[i].data());
+                return module;
+            }
+        }
+        if (!setHostPaths(module.verificationPaths[0].data(), module.verificationPaths[1].data(),
+                reinterpret_cast<const void*>(initialize), reinterpret_cast<const void*>(&cdmModule))) {
+            WTFLogAlways("Widevine: cannot configure CDM host paths");
+            return module;
+        }
+        transferred = true;
+        if (!verify(module.hostFiles.span().data(), module.hostFiles.size())) {
+            WTFLogAlways("Widevine: host verification could not start");
+            return module;
+        }
+        WTFLogAlways("Widevine: host verification started with %zu signed files", module.hostFiles.size());
         initialize();
+        module.createInstance = createInstance;
         return module;
     }();
     return module;
@@ -232,7 +291,7 @@ private:
 
     // An answer re-enters the CDM, which is not internally synchronized and may be inside Decrypt()
     // on a streaming thread, so it goes out under the lock every other entry point here takes. A CDM
-    // already torn down leaves no client to answer, which is what deliverFileIOAnswer() checks.
+    // already torn down has no owner left to reach, and its answer is dropped.
     template<typename Answer> void answerOnMainThread(Answer&& answer)
     {
         RunLoop::mainSingleton().dispatch([owner = m_owner, answer = WTF::move(answer)]() mutable {
@@ -262,23 +321,33 @@ public:
     // says outside a call goes to the client instead.
     WidevineCdmCallResult result;
     bool isInCall { false };
+    bool isInitializing { false };
 
     // Each call is issued under its own promise id, which is how the CDM names the call it is
     // answering when the answer arrives after that call returned.
     uint32_t nextPromiseID { 1 };
-    HashMap<uint32_t, String> sessionIDForPromise;
 
-    uint32_t issuePromise(const String& sessionID)
+    // The session the running call is for, as the CDM spells it; a create learns it from the
+    // promise it resolves. An event naming any other session belongs to that session.
+    CString callSessionID;
+
+    uint32_t beginCall(CString&& sessionID = { })
     {
-        uint32_t promiseID = nextPromiseID++;
-        sessionIDForPromise.set(promiseID, sessionID.isolatedCopy());
-        return promiseID;
+        result = { };
+        result.promiseID = nextPromiseID++;
+        callSessionID = WTF::move(sessionID);
+        isInCall = true;
+        return result.promiseID;
     }
 
-    String takeSessionIDForPromise(uint32_t promiseID)
+    bool reportsForCurrentCall(const char* sessionID, uint32_t sessionIDSize) const
     {
-        return sessionIDForPromise.take(promiseID).isolatedCopy();
+        return isInCall && !callSessionID.isNull() && equalSpans(callSessionID.span(), std::span { sessionID, sessionIDSize });
     }
+
+    // A promise settled while a call runs belongs to that call only if it was issued under that
+    // call's id; one left pending by an earlier call can be settled from inside a later one.
+    bool settlesCurrentCall(uint32_t promiseID) const { return isInCall && promiseID == result.promiseID; }
 
     // Where the CDM's own records go (see RecordStore), and whether it was told it may keep any.
     const Ref<RecordStore> records { RecordStore::create() };
@@ -301,19 +370,29 @@ public:
         return now.tv_sec + now.tv_usec / 1000000.0;
     }
 
-    void OnInitialized(bool success) final { result.succeeded = success; }
+    // Initialize() is answered by this rather than by a promise, so it settles the call that is
+    // initializing, or reaches the client when that call has already returned.
+    void OnInitialized(bool success) final
+    {
+        if (isInCall && isInitializing) {
+            result.succeeded = success;
+            result.settled = true;
+            return;
+        }
+        dispatchToClient([success](auto& client) {
+            client.cdmInitialized(success);
+        });
+    }
 
     void OnResolveKeyStatusPromise(uint32_t promiseID, cdm::KeyStatus) final
     {
-        sessionIDForPromise.remove(promiseID);
-        result.succeeded = true;
-        result.settled = true;
+        OnResolvePromise(promiseID);
     }
 
     void OnResolveNewSessionPromise(uint32_t promiseID, const char* sessionID, uint32_t sessionIDSize) final
     {
-        sessionIDForPromise.remove(promiseID);
-        if (isInCall) {
+        if (settlesCurrentCall(promiseID)) {
+            callSessionID = CString(std::span { sessionID, sessionIDSize });
             result.sessionID = String::fromUTF8(std::span { sessionID, sessionIDSize });
             result.succeeded = true;
             result.settled = true;
@@ -326,29 +405,33 @@ public:
 
     void OnResolvePromise(uint32_t promiseID) final
     {
-        sessionIDForPromise.remove(promiseID);
-        result.succeeded = true;
-        result.settled = true;
+        if (settlesCurrentCall(promiseID)) {
+            result.succeeded = true;
+            result.settled = true;
+            return;
+        }
+        dispatchToClient([promiseID](auto& client) {
+            client.cdmPromiseResolved(promiseID);
+        });
     }
 
     void OnRejectPromise(uint32_t promiseID, cdm::Exception, uint32_t, const char* errorMessage, uint32_t errorMessageSize) final
     {
-        auto sessionID = takeSessionIDForPromise(promiseID);
-        if (isInCall) {
+        if (settlesCurrentCall(promiseID)) {
             result.succeeded = false;
             result.settled = true;
             result.errorMessage = String::fromUTF8(std::span { errorMessage, errorMessageSize });
             return;
         }
-        dispatchToClient([promiseID, id = WTF::move(sessionID)](auto& client) {
-            client.cdmSessionFailed(promiseID, id);
+        dispatchToClient([promiseID](auto& client) {
+            client.cdmPromiseRejected(promiseID);
         });
     }
 
     void OnSessionMessage(const char* sessionID, uint32_t sessionIDSize, cdm::MessageType messageType, const char* message, uint32_t messageSize) final
     {
         Vector<uint8_t> bytes { std::span { reinterpret_cast<const uint8_t*>(message), messageSize } };
-        if (isInCall) {
+        if (reportsForCurrentCall(sessionID, sessionIDSize)) {
             result.messages.append({ messageType, WTF::move(bytes) });
             return;
         }
@@ -366,7 +449,7 @@ public:
             statuses.append({ Vector<uint8_t>(keyID), keysInfo[i].status });
         }
 
-        if (isInCall) {
+        if (reportsForCurrentCall(sessionID, sessionIDSize)) {
             result.keyStatuses = WTF::move(statuses);
             result.hasAdditionalUsableKey = hasAdditionalUsableKey;
             return;
@@ -378,7 +461,7 @@ public:
 
     void OnExpirationChange(const char* sessionID, uint32_t sessionIDSize, cdm::Time newExpiryTime) final
     {
-        if (isInCall) {
+        if (reportsForCurrentCall(sessionID, sessionIDSize)) {
             result.expirationTime = newExpiryTime;
             return;
         }
@@ -389,7 +472,7 @@ public:
 
     void OnSessionClosed(const char* sessionID, uint32_t sessionIDSize) final
     {
-        if (isInCall) {
+        if (reportsForCurrentCall(sessionID, sessionIDSize)) {
             result.sessionClosed = true;
             return;
         }
@@ -514,8 +597,7 @@ bool WidevineCdm::setStorageDirectory(const String& directory)
 void WidevineCdm::timerExpired(void* context)
 {
     Locker locker { m_lock };
-    if (m_cdm)
-        m_cdm->TimerExpired(context);
+    m_cdm->TimerExpired(context);
 }
 
 // The link each active display is reached over. A built-in panel is an internal link; anything else
@@ -542,8 +624,7 @@ void WidevineCdm::deliverOutputProtectionStatus()
     auto linkTypes = activeOutputLinkTypes();
 
     Locker locker { m_lock };
-    if (m_cdm)
-        m_cdm->OnQueryOutputProtectionStatus(cdm::QueryResult::kQuerySucceeded, linkTypes, cdm::OutputProtectionMethods::kProtectionNone);
+    m_cdm->OnQueryOutputProtectionStatus(cdm::QueryResult::kQuerySucceeded, linkTypes, cdm::OutputProtectionMethods::kProtectionNone);
 }
 
 // The machine this is running on, as the platform expert names it. It survives everything below the
@@ -584,9 +665,6 @@ void WidevineCdm::setStorageIdSeed(const String& seed)
 void WidevineCdm::deliverStorageId(uint32_t version)
 {
     Locker locker { m_lock };
-    if (!m_cdm)
-        return;
-
     if (m_storageID.isEmpty() || (version && version != 1)) {
         m_cdm->OnStorageId(version, nullptr, 0);
         return;
@@ -598,8 +676,7 @@ void WidevineCdm::deliverStorageId(uint32_t version)
 void WidevineCdm::deliverFileIOAnswer(Function<void()>&& answer)
 {
     Locker locker { m_lock };
-    if (m_cdm)
-        answer();
+    answer();
 }
 
 void WidevineCdm::deliverPlatformChallengeResponse()
@@ -607,8 +684,7 @@ void WidevineCdm::deliverPlatformChallengeResponse()
     cdm::PlatformChallengeResponse response { };
 
     Locker locker { m_lock };
-    if (m_cdm)
-        m_cdm->OnPlatformChallengeResponse(response);
+    m_cdm->OnPlatformChallengeResponse(response);
 }
 
 WidevineCdm::~WidevineCdm()
@@ -618,50 +694,37 @@ WidevineCdm::~WidevineCdm()
     // callback is discarded rather than reaching a half-destroyed object.
     m_host->owner = nullptr;
     m_host->client = nullptr;
-    if (m_cdm)
-        m_cdm->Destroy();
-    m_cdm = nullptr;
+    m_cdm->Destroy();
 }
 
-bool WidevineCdm::initialize(bool allowDistinctiveIdentifier, bool allowPersistentState)
+WidevineCdmCallResult WidevineCdm::initialize(bool allowDistinctiveIdentifier, bool allowPersistentState)
 {
     Locker locker { m_lock };
-    if (!m_cdm)
-        return false;
-
-    m_host->result = { };
-    m_host->isInCall = true;
+    m_host->beginCall();
+    m_host->isInitializing = true;
     m_host->allowsPersistentState = allowPersistentState;
-    auto leaveCall = makeScopeExit([&] { m_host->isInCall = false; });
+    auto leaveCall = makeScopeExit([&] {
+        m_host->isInCall = false;
+        m_host->isInitializing = false;
+    });
     m_cdm->Initialize(allowDistinctiveIdentifier, allowPersistentState, false);
-    return m_host->result.succeeded;
+    return WTF::move(m_host->result);
 }
 
 WidevineCdmCallResult WidevineCdm::setServerCertificate(std::span<const uint8_t> certificate)
 {
     Locker locker { m_lock };
-    if (!m_cdm)
-        return { };
-
-    m_host->result = { };
-    m_host->isInCall = true;
+    auto promiseID = m_host->beginCall();
     auto leaveCall = makeScopeExit([&] { m_host->isInCall = false; });
-    m_cdm->SetServerCertificate(m_host->issuePromise(emptyString()), certificate.data(), certificate.size());
+    m_cdm->SetServerCertificate(promiseID, certificate.data(), certificate.size());
     return WTF::move(m_host->result);
 }
 
 WidevineCdmCallResult WidevineCdm::createSessionAndGenerateRequest(cdm::SessionType sessionType, cdm::InitDataType initDataType, std::span<const uint8_t> initData)
 {
     Locker locker { m_lock };
-    if (!m_cdm)
-        return { };
-
-    m_host->result = { };
-    m_host->isInCall = true;
+    auto promiseID = m_host->beginCall();
     auto leaveCall = makeScopeExit([&] { m_host->isInCall = false; });
-    // A session this call rejects was never created, so the id names the request rather than a session.
-    auto promiseID = m_host->issuePromise(emptyString());
-    m_host->result.promiseID = promiseID;
     m_cdm->CreateSessionAndGenerateRequest(promiseID, sessionType, initDataType, initData.data(), initData.size());
     return WTF::move(m_host->result);
 }
@@ -671,13 +734,9 @@ WidevineCdmCallResult WidevineCdm::updateSession(const String& sessionID, std::s
     auto sessionIDUTF8 = sessionID.utf8();
 
     Locker locker { m_lock };
-    if (!m_cdm)
-        return { };
-
-    m_host->result = { };
-    m_host->isInCall = true;
+    auto promiseID = m_host->beginCall(CString { sessionIDUTF8 });
     auto leaveCall = makeScopeExit([&] { m_host->isInCall = false; });
-    m_cdm->UpdateSession(m_host->issuePromise(sessionID), sessionIDUTF8.data(), sessionIDUTF8.length(), response.data(), response.size());
+    m_cdm->UpdateSession(promiseID, sessionIDUTF8.data(), sessionIDUTF8.length(), response.data(), response.size());
     return WTF::move(m_host->result);
 }
 
@@ -686,13 +745,9 @@ WidevineCdmCallResult WidevineCdm::closeSession(const String& sessionID)
     auto sessionIDUTF8 = sessionID.utf8();
 
     Locker locker { m_lock };
-    if (!m_cdm)
-        return { };
-
-    m_host->result = { };
-    m_host->isInCall = true;
+    auto promiseID = m_host->beginCall(CString { sessionIDUTF8 });
     auto leaveCall = makeScopeExit([&] { m_host->isInCall = false; });
-    m_cdm->CloseSession(m_host->issuePromise(sessionID), sessionIDUTF8.data(), sessionIDUTF8.length());
+    m_cdm->CloseSession(promiseID, sessionIDUTF8.data(), sessionIDUTF8.length());
     return WTF::move(m_host->result);
 }
 
@@ -701,13 +756,9 @@ WidevineCdmCallResult WidevineCdm::removeSession(const String& sessionID)
     auto sessionIDUTF8 = sessionID.utf8();
 
     Locker locker { m_lock };
-    if (!m_cdm)
-        return { };
-
-    m_host->result = { };
-    m_host->isInCall = true;
+    auto promiseID = m_host->beginCall(CString { sessionIDUTF8 });
     auto leaveCall = makeScopeExit([&] { m_host->isInCall = false; });
-    m_cdm->RemoveSession(m_host->issuePromise(sessionID), sessionIDUTF8.data(), sessionIDUTF8.length());
+    m_cdm->RemoveSession(promiseID, sessionIDUTF8.data(), sessionIDUTF8.length());
     return WTF::move(m_host->result);
 }
 
@@ -776,32 +827,24 @@ std::span<const uint8_t> WidevineVideoFrame::plane(cdm::VideoPlane plane) const
 cdm::Status WidevineCdm::initializeVideoDecoder(const cdm::VideoDecoderConfig_2& config)
 {
     Locker locker { m_lock };
-    if (!m_cdm)
-        return cdm::Status::kInitializationError;
-
     return m_cdm->InitializeVideoDecoder(config);
 }
 
 void WidevineCdm::deinitializeVideoDecoder()
 {
     Locker locker { m_lock };
-    if (m_cdm)
-        m_cdm->DeinitializeDecoder(cdm::kStreamTypeVideo);
+    m_cdm->DeinitializeDecoder(cdm::kStreamTypeVideo);
 }
 
 void WidevineCdm::resetVideoDecoder()
 {
     Locker locker { m_lock };
-    if (m_cdm)
-        m_cdm->ResetDecoder(cdm::kStreamTypeVideo);
+    m_cdm->ResetDecoder(cdm::kStreamTypeVideo);
 }
 
 cdm::Status WidevineCdm::decryptAndDecodeFrame(const cdm::InputBuffer_2& input, WidevineVideoFrame& frame)
 {
     Locker locker { m_lock };
-    if (!m_cdm)
-        return cdm::Status::kDecryptError;
-
     return m_cdm->DecryptAndDecodeFrame(input, &frame);
 }
 
@@ -810,9 +853,6 @@ cdm::Status WidevineCdm::decrypt(const cdm::InputBuffer_2& input, std::span<uint
     DecryptedBlock block;
 
     Locker locker { m_lock };
-    if (!m_cdm)
-        return cdm::Status::kDecryptError;
-
     auto status = m_cdm->Decrypt(input, &block);
     if (status != cdm::Status::kSuccess)
         return status;

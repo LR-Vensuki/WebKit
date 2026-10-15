@@ -106,6 +106,9 @@ macro(_AQUAWEBKIT_FINALIZE_WEBCORE_TARGET _target)
             "${AQUAWEBKIT_SUPPORT}/polyfill/build/pasteboard-expiration")
     endif ()
 endmacro()
+# Runs once Source/WebCore/CMakeLists.txt has finished, after upstream has set the WebCore target's own
+# link options and properties.
+cmake_language(DEFER CALL _AQUAWEBKIT_FINALIZE_WEBCORE_TARGET WebCore)
 
 # --------------------------------------------------------------------------
 # Standalone backport blocks (targets, definitions, framework lookups, staging).
@@ -135,7 +138,9 @@ if (USE_GSTREAMER)
         ${AQUAWEBKIT_WIDEVINE_DIR}/WidevineCdmImage.cpp
         ${AQUAWEBKIT_WIDEVINE_DIR}/WidevineCdmInstaller.mm
         ${AQUAWEBKIT_WIDEVINE_DIR}/WidevineCdmModule.cpp
+        ${AQUAWEBKIT_WIDEVINE_DIR}/WidevineFirefoxArchive.cpp
     )
+    list(APPEND WebCore_LIBRARIES archive)
     # Both ports reach the installer and the module's recorded location as <WebCore/...>.
     list(APPEND WebCore_PRIVATE_FRAMEWORK_HEADERS
         ${AQUAWEBKIT_WIDEVINE_DIR}/WidevineCdmInstaller.h
@@ -461,6 +466,10 @@ list(APPEND WebCore_SOURCES
     ${AQUAWEBKIT_SUPPORT}/source/WebCore/platform/mediarecorder/MediaRecorderPrivateWriterMP4.cpp
     # Safari 7 extensions' tabs.insertCSS style sheets.
     ${AQUAWEBKIT_SUPPORT}/source/WebCore/dom/LegacyExtensionStyleSheets.cpp
+    # The documents of Safari 7 extensions' mimeHandler viewers.
+    ${AQUAWEBKIT_SUPPORT}/source/WebCore/html/LegacyExtensionMimeHandlerDocument.cpp
+    # Safari 7 extensions' webRequest for the loads WebKit 1 makes.
+    ${AQUAWEBKIT_SUPPORT}/source/WebCore/loader/LegacyLoadInterceptor.cpp
     # The article document Safari 7's Reader article finder runs against.
     ${AQUAWEBKIT_SUPPORT}/source/WebCore/page/SafariReaderMozillaReadability.cpp
     # Scroll anchoring suppression the Web Clip plug-in's injected bundle holds.
@@ -495,6 +504,8 @@ add_custom_command(
     VERBATIM)
 WEBKIT_ADD_SOURCE_DEPENDENCIES(${AQUAWEBKIT_SUPPORT}/source/WebCore/page/SafariReaderMozillaReadability.cpp "${WebCore_DERIVED_SOURCES_DIR}/SafariReaderMozillaReadabilityScriptSource.h;${WebCore_DERIVED_SOURCES_DIR}/SafariReaderFirefoxReaderableScriptSource.h")
 list(APPEND WebCore_PRIVATE_INCLUDE_DIRECTORIES
+    "${AQUAWEBKIT_SUPPORT}/source/WebCore/html"
+    "${AQUAWEBKIT_SUPPORT}/source/WebCore/loader"
     "${AQUAWEBKIT_SUPPORT}/source/WebCore/platform/network/cocoa"
     "${AQUAWEBKIT_SUPPORT}/source/WebCore/platform/mediarecorder"
 )
@@ -502,6 +513,8 @@ list(APPEND WebCore_PRIVATE_FRAMEWORK_HEADERS
     platform/AbortableTaskQueue.h
     ${AQUAWEBKIT_SUPPORT}/source/WebCore/platform/graphics/ca/cocoa/WebBackdropLayerAquaWebKit.h
     ${AQUAWEBKIT_SUPPORT}/source/WebCore/dom/LegacyExtensionStyleSheets.h
+    ${AQUAWEBKIT_SUPPORT}/source/WebCore/html/LegacyExtensionMimeHandlerDocument.h
+    ${AQUAWEBKIT_SUPPORT}/source/WebCore/loader/LegacyLoadInterceptor.h
     ${AQUAWEBKIT_SUPPORT}/source/WebCore/page/SafariReaderMozillaReadability.h
     ${AQUAWEBKIT_SUPPORT}/source/WebCore/platform/ScrollAnchoringSuppressionHandle.h
     # The classic inspector frontend's bridge script, which both ports inject.
@@ -518,6 +531,7 @@ if (USE_GSTREAMER)
         ${AQUAWEBKIT_SUPPORT}/source/WebCore/platform/graphics/gstreamer/VideoFrameGStreamerCocoa.mm
         ${AQUAWEBKIT_SUPPORT}/source/WebCore/platform/graphics/gstreamer/GLibMainContextAquaWebKit.cpp
         ${AQUAWEBKIT_SUPPORT}/source/WebCore/platform/graphics/gstreamer/GStreamerPackagingAquaWebKit.cpp
+        ${AQUAWEBKIT_SUPPORT}/source/WebCore/platform/graphics/gstreamer/URLSessionMediaResourceLoaderCocoa.mm
         ${AQUAWEBKIT_SUPPORT}/source/WebCore/platform/audio/gstreamer/GStreamerAudioDataCocoa.mm
     )
 endif ()

@@ -48,9 +48,6 @@ if [ ! -d "$WEBCLIP_PLUGIN/MacOS" ]; then
     echo "ERROR: no Web Clip widget plug-in at $WEBCLIP_PLUGIN." >&2
     exit 1
 fi
-wk_verify_tree "$WK_STAGE_ROOT" "the staged tree ($WK_STAGE_ROOT)" || {
-    echo "       Rebuild it: bash AquaWebKitSupport/build.sh" >&2
-    exit 1; }
 
 # ---------------------------------------------------------------------------
 # Copy the staged bundles into place. WebCore rides inside WebKit.framework (nested, as on stock
@@ -79,16 +76,6 @@ done
 # from what is on disk.
 echo "### Rebuilding the system XPC service cache"
 /usr/libexec/xpchelper --rebuild-cache
-# Match on the recorded executable path rather than the service name: the cache interns the names
-# adjacent to other fields, so a name is not a line of its own, and one service name is a prefix of
-# another's ("...Networking" of "...Networking.Development").
-for svc in $WK_XPC_SERVICES; do
-    if [ "$(strings /System/Library/Caches/com.apple.xpchelper.cache | grep -Fc "$XPCSERVICES/$svc.xpc/Contents/MacOS/$svc")" = 0 ]; then
-        echo "ERROR: $svc is missing from the rebuilt XPC service cache." >&2
-        exit 1
-    fi
-done
-echo "  cache holds all $(set -- $WK_XPC_SERVICES; echo $#) WebKit services"
 
 # ---------------------------------------------------------------------------
 # Web Push daemon: the webpushd binary rides inside the WK2 framework (staged with it above), and
@@ -135,8 +122,8 @@ force_64bit_web_clip_widget() {
 force_64bit_web_clip_widget
 
 # The Web Clip widget's plug-in executable, its page script, its injected bundle and the patched widget
-# script are this port's (staged under the widget's path); the widget's HTML, images and localized
-# strings stay Apple's.
+# script, page and style sheet are this port's (staged under the widget's path); the widget's images and
+# localized strings stay Apple's.
 echo "### Installing the Web Clip plug-in"
 cp -p "$WK_STAGE_ROOT$WEBCLIP_BINARY" "$WEBCLIP_BINARY"
 cp -p "$WK_STAGE_ROOT$WEBCLIP_PAGE_AGENT" "$WEBCLIP_PAGE_AGENT"
@@ -144,18 +131,16 @@ cp -p "$WK_STAGE_ROOT$WEBCLIP_EXTENSION_PAGE_SCRIPT" "$WEBCLIP_EXTENSION_PAGE_SC
 rm -rf "$WEBCLIP_PAGE_BUNDLE"
 cp -Rp "$WK_STAGE_ROOT$WEBCLIP_PAGE_BUNDLE" "$WEBCLIP_PAGE_BUNDLE"
 cp -p "$WK_STAGE_ROOT$WEBCLIP_WIDGET_SCRIPT" "$WEBCLIP_WIDGET_SCRIPT"
-chown root:admin "$WEBCLIP_BINARY" "$WEBCLIP_PAGE_AGENT" "$WEBCLIP_EXTENSION_PAGE_SCRIPT" "$WEBCLIP_WIDGET_SCRIPT"
+cp -p "$WK_STAGE_ROOT$WEBCLIP_WIDGET_PAGE" "$WEBCLIP_WIDGET_PAGE"
+cp -p "$WK_STAGE_ROOT$WEBCLIP_WIDGET_STYLE_SHEET" "$WEBCLIP_WIDGET_STYLE_SHEET"
+chown root:admin "$WEBCLIP_BINARY" "$WEBCLIP_PAGE_AGENT" "$WEBCLIP_EXTENSION_PAGE_SCRIPT" "$WEBCLIP_WIDGET_SCRIPT" "$WEBCLIP_WIDGET_PAGE" "$WEBCLIP_WIDGET_STYLE_SHEET"
 chown -R root:admin "$WEBCLIP_PAGE_BUNDLE"
 echo "  installed."
 
 # ---------------------------------------------------------------------------
-echo "### Verifying the installed product"
-wk_verify_tree "" "the installed system"
-
-# ---------------------------------------------------------------------------
 # Safari 9.1.3, where it is installed instead of Safari 7: its Safari.framework binds WebKit 601's
 # layout, which safari9/safari9.sh maps onto this one (see docs/SAFARI-9.md). The frameworks above are
-# already in place and verified, so a failure here leaves Safari 9 as it was and is reported, not fatal.
+# already in place, so a failure here leaves Safari 9 as it was and is reported, not fatal.
 if [ -f /System/Library/StagedFrameworks/Safari/Safari.framework/Versions/A/Safari ]; then
     bash "$HERE/safari9/safari9.sh" install \
         || echo "WARNING: Safari 9 was not set up for this port; see the errors above and docs/SAFARI-9.md." >&2

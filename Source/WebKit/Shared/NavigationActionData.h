@@ -96,7 +96,7 @@ struct NavigationActionData {
     String invalidURLString;
     std::optional<WebCore::NavigationRequester> requester;
 
-    // AQUAWEBKIT (#60): userData the restored injected-bundle policy client
+    // AQUAWEBKIT (#60): userData the injected-bundle policy client
     // (InjectedBundlePagePolicyClient) produces for this navigation -- for Safari 7, a WKDictionary
     // holding the "CanHandleRequest" Boolean and "OriginatingFrame" Frame keys built by
     // BrowserBundlePagePolicyClient::userDataForAction. Its UI-process WKPagePolicyClient callback
@@ -107,6 +107,9 @@ struct NavigationActionData {
     // AQUAWEBKIT: the injected bundle's policy client answered Use, so the UIProcess carries the navigation
     // out without asking its own policy client (537 semantics).
     bool bundlePolicyDecidedUse { false };
+
+    // AQUAWEBKIT: a continuing reload carries WebCore's exact reload type across a process swap.
+    std::optional<WebCore::FrameLoadType> reloadFrameLoadType;
 
     // `originalRequest` is sent as nullopt when it equals `request`; resolve it here.
     const WebCore::ResourceRequest& originalRequestOrFallback() const { return originalRequest ? *originalRequest : request; }

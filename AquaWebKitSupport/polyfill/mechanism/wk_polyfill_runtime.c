@@ -45,9 +45,6 @@ static size_t entryCount;
 // dlsym is defined below, so a plain call here would recurse. Take the real one straight out of
 // libdyld's export table instead; NSLookupSymbolInImage is itself a libdyld export and is not
 // shadowed, so it binds normally. This keeps libpolyfill.a self-contained (no helper dylib).
-//
-// Non-NULL from resolveSystemDlsym() onwards: not finding it is fatal there, so nothing below has to
-// cope with its absence.
 static void *(*systemDlsym)(void *, const char *);
 
 // NSLookupSymbolInImage/NSAddressOfSymbol are the pre-dlopen dyld API, deprecated since 10.5 but
@@ -55,11 +52,6 @@ static void *(*systemDlsym)(void *, const char *);
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
-// Every dlsym() call made from this image goes through the override below, and the override has
-// nothing to answer with but the real dlsym. So if the real one cannot be found there is no degraded
-// mode to fall back to: every lookup in the image would return NULL with dlerror() unset, which
-// surfaces far from here as SOFT_LINK_CONSTANT's RELEASE_ASSERT firing with a nonsense message while
-// no constant is ever resolved. Say what actually happened, at the point it happens, and stop.
 static void resolveSystemDlsym(void)
 {
     if (systemDlsym)
@@ -72,21 +64,9 @@ static void resolveSystemDlsym(void)
             continue;
         NSSymbol symbol = NSLookupSymbolInImage(_dyld_get_image_header(i), "_dlsym",
                                                 NSLOOKUPSYMBOLINIMAGE_OPTION_RETURN_ON_ERROR);
-        if (!symbol)
-            continue;   // this libdyld does not export it -- keep looking at the remaining images
         systemDlsym = (void *(*)(void *, const char *))NSAddressOfSymbol(symbol);
-        if (systemDlsym)
-            return;
+        return;
     }
-
-    fprintf(stderr, "[wk_polyfill] FATAL: no _dlsym export found in any libdyld.dylib image "
-                    "(%u images searched with NSLookupSymbolInImage).\n"
-                    "[wk_polyfill] This binary routes every dlsym() through the polyfill registry and "
-                    "has no other way to reach the real one, so soft-linking would return NULL "
-                    "process-wide with dlerror() unset. Aborting here rather than failing later as an "
-                    "unrelated-looking assert.\n", imageCount);
-    fflush(stderr);
-    abort();
 }
 
 #pragma clang diagnostic pop
@@ -211,7 +191,7 @@ static int addressIsOurs(void *address)
 
 static void *resolveOriginal(struct wk_polyfill_entry *entry, int mayLoad)
 {
-    resolveSystemDlsym();   // no-op once resolved; fatal if the real dlsym is unreachable
+    resolveSystemDlsym();
 
     void *handle = providerHandle(entry->provider, mayLoad);
     // A token names a framework that is not here, so there is no image behind it to search.
@@ -308,22 +288,22 @@ static int handleCanSeeProvider(void *handle, struct wk_polyfill_entry *entry)
 // A registered name resolves to OUR definition -- the same one a link-time reference binds under
 // force_load -- so soft-linking (SOFT_LINK_CONSTANT/FUNCTION) and link-time references give the same
 // answer, which is the whole point of this override. Gap-fill vs replacement makes no difference here:
-// the body always runs either way, and the build gate guarantees a gap-fill's symbol is one 10.9
-// lacks, so there is nothing on 10.9 for it to shadow. (Were a gap-fill to defer to 10.9 here while
+// the body always runs either way, and a gap-fill's symbol is one 10.9 lacks, so there is nothing on
+// 10.9 for it to shadow. (Were a gap-fill to defer to 10.9 here while
 // the link-time reference bound ours, the same name would resolve two ways.)
 //
 // An answer comes out of the registry only where a real dlsym could plausibly have produced one: the
 // handle has to be able to see the provider (above). The system's answer is taken first, so a
 // non-registered name passes straight through.
 //
-// Declared through the registry like any other polyfill, so WK_POLYFILL_REPORT names it and the shadow
-// check sees a stated intent. Registering it recurses nowhere: lookup() is a scan over this image's own
+// Declared through the registry like any other polyfill, so WK_POLYFILL_REPORT names it. Registering it
+// recurses nowhere: lookup() is a scan over this image's own
 // __wk_pfmap section, and the real dlsym is reached through systemDlsym (from NSLookupSymbolInImage) --
 // which is also why the body uses systemDlsym rather than WK_ORIGINAL: it must work before anything has
 // read the registry.
 WK_POLYFILL_REPLACES(NULL, void *, dlsym, (void *handle, const char *symbol))
 {
-    resolveSystemDlsym();   // no-op once resolved; fatal if the real dlsym is unreachable
+    resolveSystemDlsym();
 
     // A token is this layer's own object, not a dyld handle; the real dlsym must never see one.
     void *systemAnswer = wk_polyfill_is_absent_provider_token(handle) ? NULL : systemDlsym(handle, symbol);
@@ -449,18 +429,7 @@ static int classProviderPathIsRegistered(const char *frameworkPath)
 // not this one.
 WK_POLYFILL_REPLACES("/usr/lib/libobjc.A.dylib", Class, objc_getClass, (const char *name))
 {
-    wk_pf_fn_objc_getClass systemGetClass = WK_ORIGINAL(objc_getClass);
-    if (!systemGetClass) {
-        // Same reasoning as resolveSystemDlsym: every objc_getClass call in this image comes here,
-        // and there is nothing to answer with but libobjc's. Silently returning NULL would surface
-        // far away as classes that exist appearing not to.
-        fprintf(stderr, "[wk_polyfill] FATAL: libobjc.A.dylib does not export objc_getClass, so this "
-                        "image cannot look up any class by name.\n");
-        fflush(stderr);
-        abort();
-    }
-
-    Class systemAnswer = systemGetClass(name);
+    Class systemAnswer = WK_ORIGINAL(objc_getClass)(name);
     if (systemAnswer || !name)
         return systemAnswer;
     return (Class)lookupPolyfillClass(name);
@@ -506,6 +475,9 @@ static void report(void)
         abort();
 }
 
+// The mach header of the image this copy of the archive is linked into, defined by the static linker.
+extern const struct mach_header __dso_handle;
+
 // Ahead of the image's other initializers, so the registry is populated before any soft-link lookup
 // reaches the dlsym override above. (Numbers below 101 are reserved for the implementation.)
 __attribute__((constructor(101)))
@@ -517,13 +489,8 @@ static void wk_polyfill_init(void)
     // initializers run — see the note above noteClassStubImage.
     _dyld_register_func_for_add_image(noteClassStubImage);
 
-    Dl_info info;
-    if (!dladdr((void *)&wk_polyfill_init, &info) || !info.dli_fbase)
-        return;
-
     unsigned long size = 0;
-    uint8_t *section = getsectiondata((const wk_mach_header *)info.dli_fbase,
-                                      "__DATA", "__wk_pfmap", &size);
+    uint8_t *section = getsectiondata((const wk_mach_header *)&__dso_handle, "__DATA", "__wk_pfmap", &size);
     if (!section)
         return;   // an image that links the archive without pulling in any polyfill
 

@@ -59,7 +59,8 @@ static bool linkedBefore(dyld_build_version_t version, uint32_t fallbackIOSVersi
 #endif
 }
 
-#if USE(APPLE_INTERNAL_SDK) && __has_include(<WebKitAdditions/RuntimeApplicationChecksCocoaAdditions.cpp>)
+// #if USE(APPLE_INTERNAL_SDK) && __has_include(<WebKitAdditions/RuntimeApplicationChecksCocoaAdditions.cpp>)
+#if __has_include(<WebKitAdditions/RuntimeApplicationChecksCocoaAdditions.cpp>) // AQUAWEBKIT: AquaWebKitSupport/polyfill/headers supplies the gates Apple's internal additions hold for these behaviors.
 #import <WebKitAdditions/RuntimeApplicationChecksCocoaAdditions.cpp>
 #else
 static void NODELETE disableAdditionalSDKAlignedBehaviors(SDKAlignedBehaviors&)
@@ -89,6 +90,9 @@ static SDKAlignedBehaviors computeSDKAlignedBehaviors()
 
     if (linkedBefore(dyld_fall_2015_os_versions, DYLD_IOS_VERSION_9_0, DYLD_MACOSX_VERSION_10_11))
         disableBehavior(SDKAlignedBehavior::PictureInPictureMediaPlayback);
+
+    if (linkedBefore(dyld_fall_2015_os_versions, DYLD_IOS_VERSION_9_0, DYLD_MACOSX_VERSION_10_11))
+        disableBehavior(SDKAlignedBehavior::BlockOrUpgradeMixedContent); // AQUAWEBKIT: NetNewsWire's https articles load rsstylesheet: and rsfavicon: subresources.
 
     if (linkedBefore(dyld_fall_2016_os_versions, DYLD_IOS_VERSION_10_0, DYLD_MACOSX_VERSION_10_12)) {
         disableBehavior(SDKAlignedBehavior::MediaTypesRequiringUserActionForPlayback);
@@ -241,6 +245,9 @@ static SDKAlignedBehaviors computeSDKAlignedBehaviors()
 
     if (linkedBefore(dyld_2025_SU_B_os_versions, DYLD_IOS_VERSION_26_1, DYLD_MACOSX_VERSION_26_1))
         disableBehavior(SDKAlignedBehavior::GetBoundingClientRectZoomed);
+
+    if (linkedBefore(dyld_2025_SU_B_os_versions, DYLD_IOS_VERSION_26_1, DYLD_MACOSX_VERSION_26_1))
+        disableBehavior(SDKAlignedBehavior::EmbedAttributeChangeReconstructsRenderers); // AQUAWEBKIT: Dashboard's WebClip plug-in rewrites its <embed>'s style and width on every layout.
 
     if (linkedBefore(dyld_fall_2026_os_versions, DYLD_IOS_VERSION_27_0, DYLD_MACOSX_VERSION_27_0)) {
         disableBehavior(SDKAlignedBehavior::IgnorePageLocationDuringHardPocketEligibilityCheck);

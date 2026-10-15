@@ -1,0 +1,34 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>QuickTime handoff</title>
+<h1>QuickTime handoff</h1>
+<p><a href="?source=plain.mp4">MP4</a> · <a href="?source=index.m3u8">Native HLS</a> · <a href="?source=mse.mp4">MSE H.264/AAC</a> · <a href="?source=vp9-opus.webm">MSE VP9/Opus</a> · <a href="?source=vp8-vorbis.webm">MSE VP8/Vorbis</a></p>
+<video id="video" controls width="640" height="360"></video>
+<pre id="result"></pre>
+<script>
+(async () => {
+    const source = new URLSearchParams(location.search).get('source') || 'plain.mp4';
+    const url = '/quicktime-media/' + source;
+    const video = document.querySelector('video');
+    const result = document.querySelector('#result');
+    video.addEventListener('error', () => result.textContent = video.error.message);
+    if (source === 'plain.mp4' || source === 'index.m3u8')
+        video.src = url;
+    else {
+        const media = new MediaSource();
+        video.src = URL.createObjectURL(media);
+        await new Promise(resolve => media.addEventListener('sourceopen', resolve, { once: true }));
+        const mime = source === 'mse.mp4' ? 'video/mp4; codecs="avc1.42E01E,mp4a.40.2"'
+            : source === 'vp9-opus.webm' ? 'video/webm; codecs="vp9,opus"' : 'video/webm; codecs="vp8,vorbis"';
+        const buffer = media.addSourceBuffer(mime);
+        const bytes = await (await fetch(url)).arrayBuffer();
+        buffer.appendBuffer(bytes);
+        await new Promise((resolve, reject) => {
+            buffer.addEventListener('updateend', resolve, { once: true });
+            buffer.addEventListener('error', reject, { once: true });
+        });
+        media.endOfStream();
+        result.textContent = 'Appended ' + bytes.byteLength + ' bytes';
+    }
+})();
+</script>

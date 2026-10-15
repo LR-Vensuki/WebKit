@@ -2438,9 +2438,9 @@ void GraphicsLayerCA::updateNames()
 // AQUAWEBKIT: only the Cocoa legacy renderer needs explicit CSS sorting boundaries.
 static bool needsDepthSortingBoundaries(PlatformCALayer& layer)
 {
+    // Coordinate-only backdrop hosts still isolate their children's CSS 3D contexts.
     return is<PlatformCALayerCocoa>(layer) && PlatformCALayerCocoa::needsExplicitDepthSorting()
-        // && layer.layerType() != PlatformCALayer::LayerType::LayerTypeTransformLayer;
-        && (layer.layerType() != PlatformCALayer::LayerType::LayerTypeTransformLayer || downcast<PlatformCALayerCocoa>(layer).isBackdropHostingLayer()); // AQUAWEBKIT: coordinate-only hosts still isolate their children's CSS 3D contexts.
+        && (layer.layerType() != PlatformCALayer::LayerType::LayerTypeTransformLayer || downcast<PlatformCALayerCocoa>(layer).isBackdropHostingLayer());
 }
 
 // AQUAWEBKIT: the actual platform tree carries context ownership and native animations.
@@ -3178,6 +3178,24 @@ bool GraphicsLayerCA::ensureStructuralLayer(StructuralLayerPurpose purpose)
     }
 
     moveAnimations(layer.get(), m_structuralLayer.get());
+    // AQUAWEBKIT: so do the leaf animations, from m_layer to the structural layer and from each clone of m_layer
+    // to the structural layer's clone of the same ID, or off it where there is none; updateAnimations() removes
+    // them only from those, including the finished animation whose removal created a backdrop sampling host.
+    for (auto& animation : m_animations) {
+        if (animatedLayer(animation.m_property) != m_structuralLayer.get())
+            continue;
+        String animationID = animation.animationIdentifier();
+        moveOrCopyLayerAnimation(Move, animationID, std::nullopt, layer.get(), m_structuralLayer.get());
+        if (!m_layerClones)
+            continue;
+        for (auto& clone : m_layerClones->primaryLayerClones) {
+            Ref cloneLayer = clone.value;
+            if (RefPtr structuralClone = m_layerClones->structuralLayerClones.get(clone.key))
+                moveOrCopyLayerAnimation(Move, animationID, std::nullopt, cloneLayer.ptr(), structuralClone.get());
+            else
+                cloneLayer->removeAnimationForKey(animationID);
+        }
+    }
     return true;
 }
 

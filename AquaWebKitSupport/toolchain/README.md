@@ -7,7 +7,7 @@ is obvious by location:
   just clang: `clang-NN` + `lld` (bzip2-compressed), `llvm-ar`, the
   `clang.cfg`/`clang++.cfg` link set, the resource headers, and the private
   `libc++`/`libc++abi`/`libunwind` dylibs, and LLVM's `LICENSE.TXT`.
-- **`scripts/`** — COMMITTED source: `build_{cctools,python3,nasm,ninja,cmake,ccache,git}.sh`.
+- **`scripts/`** — COMMITTED source: `build_{cctools,openssl,python3,nasm,ninja,cmake,ccache,git,ruby,coreutils}.sh`.
 - **`patches/`** — COMMITTED patches the build scripts apply to the tools they build;
   each patch's header states the defect it fixes.
 - **`bootstrap.sh`** — assembles `build/` from `vendor/` + `scripts/`.
@@ -18,9 +18,9 @@ The clang `.cfg` files use clang's `<CFGDIR>` token (`-L/-rpath <CFGDIR>/../lib`
 toolchain is relocatable: it finds its own `libc++`/`libc++abi`/`libunwind` wherever it's
 unpacked.
 
-## Updating the helper tools (cctools / cmake / ninja / python3 / nasm / ccache / git)
+## Updating the helper tools (cctools / openssl / cmake / ninja / python3 / nasm / ccache / git / ruby / coreutils)
 
-1. Bump `VERSION` (or `VER`) at the top of the relevant `scripts/build_*.sh`.
+1. Bump `VERSION` (or `VER`, and its `SHA256` where the script pins one) at the top of the relevant `scripts/build_*.sh`.
 2. `rm -rf build/<tool>` and re-run `bootstrap.sh` (or just that script).
 3. `build/` is gitignored, so the only thing to commit is the script change.
 
@@ -69,14 +69,12 @@ sources required by the host tools. Generated products and caches live in
 
 The source compiler permits the x86_64 macOS deployment floor of 10.9, preserving
 Darwin's ABI and AArch64's 11.0 minimum. Its host sysroot includes the full
-upstream library target. Bootstrap checks the compiler's reported deployment
-target, emitted Mach-O metadata, and actual Cargo build-script and procedural
-macro execution. Source and runtime fingerprints govern reuse under shared
-mutation locks.
+upstream library target. Source and runtime fingerprints govern reuse under
+shared mutation locks.
 
 Host tools bind missing system APIs through a two-level libSystem reexport
 backed by the shared polyfill implementations. The matching LLVM provider is
-retained, and its tools use native libc++ after an import audit. Explicit-target
+retained, and its tools use native libc++. Explicit-target
 Cargo builds rebuild `std` and `panic_unwind` for 10.9 and link the dependency
 gap archive. `scripts/test_rust_target.py` verifies the target dylib's deployment
 metadata and executes unwinding, destructors, threads, entropy, clocks and file

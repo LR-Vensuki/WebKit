@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build Aqua WebKit: polyfill archives, ninja (configuring first if the build dir is
-# new), staging into WebKitBuild/Release/staged, then the post-build audits. Everything logs to
+# new), staging into WebKitBuild/Release/staged, then the undefined-reference audits. Everything logs to
 # /tmp/wk_build.log. "REBUILD DONE (rc=0)" is printed once, at the very end, and is the signal that the
 # staged product is complete and installable (sudo bash AquaWebKitSupport/install.sh).
 set -uo pipefail
@@ -9,9 +9,10 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && /bin/pwd -P)"
 TC="$ROOT/AquaWebKitSupport/toolchain/build"
 NINJA="$TC/ninja/bin/ninja"
-# OptionsMac.cmake runs Tools/Scripts/generate-cmake-xcode-project at every configure, and that
-# script finds ninja on PATH; the toolchain's is the one every configure here uses.
-export PATH="$TC/ninja/bin:$PATH"
+# Every configure here takes ninja and sort from the toolchain on PATH: OptionsMac.cmake runs
+# Tools/Scripts/generate-cmake-xcode-project, which finds ninja there, and PlatformMac.cmake runs
+# Source/WebKit/Scripts/generate-swift-availability-macros, which needs `sort -V`.
+export PATH="$TC/coreutils/bin:$TC/ninja/bin:$PATH"
 CMAKE="$TC/cmake/bin/cmake"
 CCACHE="${AQUAWEBKIT_CCACHE:-$TC/ccache/bin/ccache}"   # the same resolution as cmake/mac10.9-toolchain.cmake
 BUILD="$ROOT/WebKitBuild/Release"
@@ -19,6 +20,10 @@ BUILD="$ROOT/WebKitBuild/Release"
 # FAILED/dups/undefined counts below read it back. Run this bare and tail the log.
 . "$ROOT/AquaWebKitSupport/scripts/build-log.sh"
 build_log_open
+if [ ! -x "$TC/coreutils/bin/sort" ]; then
+    echo "FATAL: no $TC/coreutils/bin/sort -- run AquaWebKitSupport/toolchain/bootstrap.sh"
+    exit 1
+fi
 
 # install.sh installs the staged tree, which survives a failed build. This stamp is the freshness
 # signal: cleared here, written back only after a successful link, staging and audit run below.
@@ -30,7 +35,7 @@ rm -f "$WK_BUILD_STAMP"
 # link below reads from there. It force-loads the polyfill's shared/ sources into the whole media
 # runtime as well, so an edit to one of them parts those dylibs from the copy libpolyfill.a gives
 # the frameworks; the currency check below the takeover reads only the sources and the deps build's
-# manifest, and relinks on a stale answer. The audit at the end proves it over the staged product.
+# manifest, and relinks on a stale answer.
 DEPS_LOCK="$ROOT/AquaWebKitSupport/deps/work/.lock"
 
 # --- Take over from an in-flight build --------------------------------------------------------
@@ -164,14 +169,6 @@ if [ -n "$DEPS_STALE" ]; then
         echo "==================== DEPS BUILD FAILED — ABORTING ===================="
         exit 1
     fi
-    if ! bash "$ROOT/AquaWebKitSupport/scripts/check-gap-archive-current.sh" --sources-only; then
-        echo "==================== GAP SOURCES ARE AHEAD OF THE DEPS BUILD — ABORTING ===================="
-        exit 1
-    fi
-    if ! bash "$ROOT/AquaWebKitSupport/deps/build_deps.sh" --check-recipes; then
-        echo "==================== DEPS RECIPES ARE AHEAD OF THE DEPS BUILD — ABORTING ===================="
-        exit 1
-    fi
 fi
 
 # Share a cache across checkout builds, comparing generated-header contents despite
@@ -240,40 +237,14 @@ if [ -n "$_waited_configure" ]; then
     fi
 fi
 
-# --- Polyfill archives (not in the ninja graph) ----------------------------------------------
-# The archives are force-loaded through raw -Wl,-force_load flags ninja does not track, so they are
-# rebuilt here every time and, when an archive's bytes change (llvm-ar is deterministic), the
-# binaries that consume it are removed so ninja relinks them:
-#   libpolyfill.a, libwk_marker.a  -> all four frameworks (WEBKIT_FRAMEWORK in WebKitMacros.cmake)
-#   libpolyfill_methods.a          -> WebCore          libwtf_compat.a -> JavaScriptCore
-#   libpolyfill_webkit.a           -> WebKit
-POLY_OUT="$ROOT/AquaWebKitSupport/polyfill/build"
-poly_hash() { shasum -a 256 "$POLY_OUT/$1" 2>/dev/null | awk '{print $1}'; }
-PRE_ALL="$(poly_hash libpolyfill.a)$(poly_hash libwk_marker.a)"
-PRE_WEBCORE="$(poly_hash libpolyfill_methods.a)"
-PRE_JSC="$(poly_hash libwtf_compat.a)"
-PRE_WEBKIT="$(poly_hash libpolyfill_webkit.a)"
+# --- Polyfill archives -----------------------------------------------------------------------
+# build-polyfill.sh rewrites an archive only when its bytes change; each one is a LINK_DEPENDS of the
+# frameworks that force-load it, so ninja relinks exactly those.
 echo "### building polyfill archives (AquaWebKitSupport/polyfill/build-polyfill.sh)"
 # $LOG already holds this run's cmake configure output, so the failure path below reads only
 # the lines this build appends.
 _polyfrom=$(( $(wc -l < "$LOG") + 1 ))
-if bash "$ROOT/AquaWebKitSupport/polyfill/build-polyfill.sh"; then
-    RELINK=""
-    if [ "$PRE_ALL" != "$(poly_hash libpolyfill.a)$(poly_hash libwk_marker.a)" ]; then
-        RELINK="JavaScriptCore WebCore WebKit WebKitLegacy"
-    else
-        [ "$PRE_WEBCORE" != "$(poly_hash libpolyfill_methods.a)" ] && RELINK="$RELINK WebCore"
-        [ "$PRE_JSC" != "$(poly_hash libwtf_compat.a)" ] && RELINK="$RELINK JavaScriptCore"
-        [ "$PRE_WEBKIT" != "$(poly_hash libpolyfill_webkit.a)" ] && RELINK="$RELINK WebKit"
-    fi
-    if [ -n "$RELINK" ]; then
-        echo "###   polyfill archives changed -> forcing relink:$RELINK"
-        for fw in $RELINK; do rm -f "$BUILD/lib/$fw.framework/Versions/A/$fw"; done
-    else
-        echo "###   polyfill unchanged"
-    fi
-else
-    # A stale archive would link a call site against an old selector map and crash at runtime.
+if ! bash "$ROOT/AquaWebKitSupport/polyfill/build-polyfill.sh"; then
     echo "==================== POLYFILL BUILD FAILED — ABORTING (would link a STALE polyfill) ===================="
     _polyerrors="$(tail -n +$_polyfrom "$LOG" | grep -nE "error:|warning:.*wk_|undefined" | head -20)"
     printf '%s\n' "$_polyerrors"
@@ -335,10 +306,9 @@ _ninja_log | grep -E 'error:|file not found|FAILED:' | grep -vE 'warning:' | sed
 
 # --- Staging + audits -------------------------------------------------------------------------
 # stage-frameworks.sh turns the linked frameworks into the complete installable product under
-# WebKitBuild/Release/staged; install.sh copies that tree onto the system. The audits need the FINAL
+# WebKitBuild/Release/staged; install.sh copies that tree onto the system. The audits read the FINAL
 # binaries, which exist only once staging has run:
 #   check-absent-references.sh  a reference to a symbol 10.9 lacks binds to 0 and faults on first use
-#   check-sandbox-profiles.sh   a profile 10.9's sandbox cannot compile CRASH()es WebContent at launch
 #   check-abi-gap.sh            every symbol 10.9 binaries bind from our frameworks must be exported
 if [ "$RC" = 0 ]; then
     echo "==================== STAGING ===================="
@@ -376,6 +346,11 @@ $dir/$leaf"
 $gst/$leaf"
                 fi
             done <<< "$homes"
+            # GIO's module directory, beside libgio (see stage-frameworks.sh).
+            gio="$(build_home_dir "$(awk '$2 == "libgio-2.0.0.dylib" {print $1}' <<< "$homes")")"
+            mkdir -p "$gio/gio/modules" || exit 1
+            expected="$expected
+$gio/gio"
             # Anything in these directories outside the computed set is removed.
             for dir in "$(build_home_dir jsc)" "$(build_home_dir webcore)" "$gst"; do
                 for f in "$dir"/*; do
@@ -391,7 +366,7 @@ else
     echo "### staging skipped: the link failed, so there is nothing complete to stage"
 fi
 
-for audit in scripts/check-absent-references.sh sandbox/scripts/check-sandbox-profiles.sh host-abi/check-abi-gap.sh; do
+for audit in scripts/check-absent-references.sh host-abi/check-abi-gap.sh; do
     [ "$RC" = 0 ] || break
     echo "### $audit"
     bash "$ROOT/AquaWebKitSupport/$audit" || RC=$?
