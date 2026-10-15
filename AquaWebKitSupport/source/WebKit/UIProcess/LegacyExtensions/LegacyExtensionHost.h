@@ -19,6 +19,7 @@
 #include <wtf/CompletionHandler.h>
 #include <wtf/HashMap.h>
 #include <wtf/Expected.h>
+#include <wtf/Variant.h>
 #include <wtf/JSONValues.h>
 #include <wtf/Markable.h>
 #include <wtf/NeverDestroyed.h>
@@ -85,6 +86,7 @@ public:
 
     void pageWasCreated(WebPageProxy&);
     void pageWillClose(WebPageProxy&);
+    void tabWillClose(WebPageProxy&);
     void didCommitLoad(WebPageProxy&, WebFrameProxy&, Markable<WebCore::ScriptExecutionContextIdentifier> documentID, API::Navigation*, WebCore::FrameLoadType, const URL&);
     void didStartProvisionalLoad(WebPageProxy&, WebFrameProxy&, const URL&);
     void didFinishDocumentLoad(WebPageProxy&, WebFrameProxy&);
@@ -180,7 +182,12 @@ private:
         uint64_t dispatched { 0 };
     };
 
-    void openInQuickTimePlayer(IPC::Connection&, WebCore::FrameIdentifier, WebCore::ScriptExecutionContextIdentifier, URL&& documentURL, String&& extensionKey, URL&&, CompletionHandler<void(Expected<URL, String>&&)>&&);
+    void beginMediaPlayerHandoff(IPC::Connection&, WebCore::FrameIdentifier, uint64_t request, uint64_t parent, String&& ticket, String&& extensionKey, CompletionHandler<void(Expected<bool, String>&&)>&&);
+    void controlMediaPlayer(IPC::Connection&, uint64_t, String&&, double, CompletionHandler<void(bool)>&&);
+    void endMediaPlayerHandoff(IPC::Connection&, uint64_t request);
+    void activateMediaPlayer(IPC::Connection&, uint64_t identifier, CompletionHandler<void(Expected<bool, String>&&)>&&);
+    void openInMediaPlayer(IPC::Connection&, WebCore::FrameIdentifier, WebCore::ScriptExecutionContextIdentifier, URL&& documentURL, String&& extensionKey, String&& application, uint64_t request, uint64_t identifier, URL&& directURL, String&& playlist, String&& title, String&& adapter, String&& captureCodec, double position, double rate, bool paused, CompletionHandler<void(Expected<URL, String>&&)>&&);
+    void endRestream(IPC::Connection&, uint64_t);
     void post(IPC::Connection&, WebCore::FrameIdentifier, WebCore::ScriptExecutionContextIdentifier, URL&& documentURL, String&& extensionKey, String&& message, IPC::SharedBufferReference&& data);
 
     void route(const Endpoint&, const String& extensionKey, const String& message, RefPtr<WebCore::SharedBuffer>&& data = nullptr);
@@ -198,7 +205,7 @@ private:
 
     Vector<Endpoint> hostContextsListeningTo(const String& extensionKey, const String& eventName, const Endpoint& except) const;
     void tabEndpoints(WebPageProxy&, std::optional<double> frameId, const String& extensionKey, CompletionHandler<void(Vector<Endpoint>&&)>&&);
-    bool deliver(const Endpoint&, const String& extensionKey, const String& message, RefPtr<WebCore::SharedBuffer>&& data = nullptr);
+    bool deliver(const Endpoint&, const String& extensionKey, const String& message, RefPtr<WebCore::SharedBuffer>&& data = nullptr, bool existingPort = false);
     Ref<JSON::Object> senderDescription(const Endpoint&) const;
     void endpointDidGoAway(const Endpoint&);
     void endpointsDidGoAway(NOESCAPE const Function<bool(const Endpoint&)>&);

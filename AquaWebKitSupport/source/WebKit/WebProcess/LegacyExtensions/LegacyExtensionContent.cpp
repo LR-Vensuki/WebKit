@@ -1,5 +1,11 @@
 #include "config.h"
 #include "LegacyExtensionContent.h"
+#include "MediaRestreamSession.h"
+#include <WebCore/MediaPlayer.h>
+#include <WebCore/EventListener.h>
+#include <WebCore/EventNames.h>
+#include <WebCore/Event.h>
+#include <wtf/RunLoop.h>
 
 #include "InjectedBundleScriptWorld.h"
 #include "LegacyExtensionContentMessages.h"
@@ -22,8 +28,12 @@
 #include <JavaScriptCore/JSRetainPtr.h>
 #include <JavaScriptCore/JSStringRef.h>
 #include <wtf/Expected.h>
+#include <wtf/HashSet.h>
+#include <cmath>
+#include <vector>
 #include <WebCore/JSDOMWindow.h>
 #include <WebCore/JSElement.h>
+#include <WebCore/JSTextTrack.h>
 #include <WebCore/JSWindowProxy.h>
 #include <WebCore/DocumentLoader.h>
 #include <WebCore/LegacyExtensionMimeHandlerDocument.h>
@@ -40,6 +50,7 @@
 #include <wtf/JSONValues.h>
 #include <wtf/NeverDestroyed.h>
 #include <wtf/text/MakeString.h>
+#include <wtf/text/StringToIntegerConversion.h>
 
 namespace WebKit {
 
@@ -146,19 +157,21 @@ static JSValueRef contentContextWithClipboardWriteAccess(JSContextRef context, J
     return result;
 }
 
-struct QuickTimePromise {
+struct MediaPlayerPromise {
     JSRetainPtr<JSGlobalContextRef> context;
     JSObjectRef resolve;
     JSObjectRef reject;
+    bool restream { false };
+    std::optional<ContentContextNative> caller;
 
-    QuickTimePromise(JSContextRef context, JSObjectRef resolve, JSObjectRef reject)
+    MediaPlayerPromise(JSContextRef context, JSObjectRef resolve, JSObjectRef reject)
         : context(JSContextGetGlobalContext(context)), resolve(resolve), reject(reject)
     {
         JSValueProtect(context, resolve);
         JSValueProtect(context, reject);
     }
 
-    ~QuickTimePromise()
+    ~MediaPlayerPromise()
     {
         JSValueUnprotect(context.get(), resolve);
         JSValueUnprotect(context.get(), reject);
@@ -166,12 +179,14 @@ struct QuickTimePromise {
 
     void complete(Expected<URL, String>&& result)
     {
+        if (result && caller && !documentForNative(*caller))
+            result = makeUnexpected("no-source"_s);
         auto text = result ? result->string() : result.error();
         auto string = adopt(JSStringCreateWithUTF8CString(text.utf8().data()));
         JSValueRef value = JSValueMakeString(context.get(), string.get());
         if (result) {
             auto object = JSON::Object::create();
-            object->setString("method"_s, "url"_s);
+            object->setString("method"_s, restream ? "restream"_s : "url"_s);
             object->setString("url"_s, text);
             auto json = adopt(JSStringCreateWithUTF8CString(object->toJSONString().utf8().data()));
             value = JSValueMakeFromJSONString(context.get(), json.get());
@@ -181,37 +196,575 @@ struct QuickTimePromise {
     }
 };
 
-static JSValueRef contentContextOpenInQuickTimePlayer(JSContextRef context, JSObjectRef, JSObjectRef thisObject, size_t argumentCount, const JSValueRef arguments[], JSValueRef* exception)
+class MediaPlayerSourceListener final : public WebCore::EventListener {
+public:
+    static Ref<MediaPlayerSourceListener> create(Function<void()>&& changed) { return adoptRef(*new MediaPlayerSourceListener(WTF::move(changed))); }
+    void handleEvent(WebCore::ScriptExecutionContext&, WebCore::Event&) final { m_changed(); }
+private:
+    explicit MediaPlayerSourceListener(Function<void()>&& changed) : EventListener(NativeEventListenerType), m_changed(WTF::move(changed)) { }
+    Function<void()> m_changed;
+};
+
+// The JS completion owns only a weak request reference and can be called once.
+static JSObjectRef sourceCompletion(JSContextRef context, Function<void(String)>&& completion)
+{
+    using Callback = Function<void(String)>;
+    static JSClassRef callbackClass = [] {
+        JSClassDefinition definition = kJSClassDefinitionEmpty;
+        definition.className = "MediaSourceCompletion";
+        definition.finalize = [](JSObjectRef object) { delete static_cast<Callback*>(JSObjectGetPrivate(object)); };
+        definition.callAsFunction = [](JSContextRef context, JSObjectRef function, JSObjectRef, size_t count, const JSValueRef arguments[], JSValueRef*) -> JSValueRef {
+            auto& callback = *static_cast<Callback*>(JSObjectGetPrivate(function));
+            if (callback) {
+                auto complete = std::exchange(callback, { });
+                complete(count && JSValueIsString(context, arguments[0]) ? LegacyExtensions::stringArgument(context, count, arguments, 0) : String { });
+            }
+            return JSValueMakeUndefined(context);
+        };
+        return JSClassCreate(&definition);
+    }();
+    return JSObjectMake(context, callbackClass, new Callback(WTF::move(completion)));
+}
+
+enum class MediaPlayerSourceMode { Auto, Direct, Capture };
+
+static uint64_t nextMediaPlayerHandoffIdentifier()
+{
+    static uint64_t identifier = 0;
+    return ++identifier;
+}
+
+static bool activeMediaPlayerHandoffScope(const ContentContextNative&, uint64_t);
+
+static std::optional<uint64_t> parentMediaPlayerHandoff(JSContextRef context, size_t count, const JSValueRef arguments[], size_t index, const ContentContextNative& native)
+{
+    if (count <= index || JSValueIsUndefined(context, arguments[index]))
+        return 0;
+    auto identifier = parseInteger<uint64_t>(LegacyExtensions::stringArgument(context, count, arguments, index));
+    if (!identifier || !activeMediaPlayerHandoffScope(native, *identifier))
+        return std::nullopt;
+    return identifier;
+}
+
+struct MediaPlayerOpenRequest : std::enable_shared_from_this<MediaPlayerOpenRequest> {
+    Vector<std::unique_ptr<MediaPlayerPromise>> pending;
+    std::optional<URL> completedURL;
+    std::optional<uint64_t> sourceIdentifier;
+    bool finished { false };
+    bool restream { false };
+    MediaPlayerSourceMode sourceMode { MediaPlayerSourceMode::Auto };
+    ContentContextNative native;
+    WeakPtr<WebCore::HTMLMediaElement> media;
+    RefPtr<WebCore::MediaPlayer> player;
+    WebCore::ScriptExecutionContextIdentifier document;
+    URL sourceURL;
+    String application;
+    String title;
+    String adapter;
+    Vector<URL> candidates;
+    std::optional<Vector<Ref<WebCore::TextTrack>>> textTracks;
+    size_t nextCandidate { 0 };
+    std::optional<uint64_t> directIdentifier;
+    uint64_t requestIdentifier { 0 };
+    uint64_t parentHandoffIdentifier { 0 };
+    uint64_t presentationIdentifier { 0 };
+    WebCore::IntSize captureSize;
+    String captureCodec;
+    String openingMessage;
+    bool negotiating { false };
+    bool returningToLocal { false };
+    bool negotiatedRemote { false };
+    bool restoringPlayIntent { false };
+    bool resolvingSource { false };
+    JSRetainPtr<JSGlobalContextRef> resolverContext;
+    JSObjectRef resolver { nullptr };
+    double initialPosition { 0 };
+    double initialRate { 1 };
+    bool initiallyPaused { false };
+    RefPtr<MediaPlayerSourceListener> sourceListener;
+    RunLoop::Timer sourceTimer;
+    std::shared_ptr<MediaPlayerOpenRequest> preparing;
+
+    MediaPlayerOpenRequest(std::unique_ptr<MediaPlayerPromise>&& promise, const ContentContextNative& context, WebCore::HTMLMediaElement& element, String app, String mediaTitle, String message, String description, std::optional<Vector<Ref<WebCore::TextTrack>>>&& tracks)
+        : native(context), media(element), player(element.player()), document(element.document().identifier()), sourceURL(element.currentSrc()), application(WTF::move(app)), title(WTF::move(mediaTitle)), adapter(WTF::move(description)), candidates(element.externalMediaSourceURLs()), textTracks(WTF::move(tracks)), openingMessage(WTF::move(message)), sourceTimer(RunLoop::mainSingleton(), "External playback source negotiation"_s, [this] { sourceDeadline(); })
+    {
+        initialPosition = std::isfinite(element.duration()) ? element.currentTime() : 0;
+        initialRate = element.playbackRate();
+        initiallyPaused = element.paused();
+        pending.append(WTF::move(promise));
+        for (auto& track : *textTracks) {
+            if (track->trackType() != WebCore::TextTrack::InBand) {
+                candidates.clear();
+                break;
+            }
+            candidates.removeAllMatching([&](auto& url) { return url != sourceURL; });
+        }
+    }
+
+    static std::vector<std::weak_ptr<MediaPlayerOpenRequest>>& requests()
+    {
+        static NeverDestroyed<std::vector<std::weak_ptr<MediaPlayerOpenRequest>>> requests;
+        return requests;
+    }
+
+    static bool sameAdapter(const String& a, const String& b)
+    {
+        if (a == b)
+            return true;
+        auto firstValue = JSON::Value::parseJSON(a);
+        auto secondValue = JSON::Value::parseJSON(b);
+        auto first = firstValue ? firstValue->asObject() : nullptr;
+        auto second = secondValue ? secondValue->asObject() : nullptr;
+        if (!first || !second || first->size() != 5 || second->size() != 5)
+            return false;
+        for (auto key : { "position"_s, "duration"_s, "rate"_s, "play"_s, "pause"_s }) {
+            if (first->getString(key) != second->getString(key))
+                return false;
+        }
+        return true;
+    }
+
+    bool matches(const ContentContextNative& context, const String& app, const String& description, const Vector<Ref<WebCore::TextTrack>>& tracks, MediaPlayerSourceMode mode, const WebCore::IntSize& size, const String& codec) const
+    {
+        return native.extensionKey == context.extensionKey && application == app && sameAdapter(adapter, description)
+            && (finished ? (mode == MediaPlayerSourceMode::Auto || (restream ? mode == MediaPlayerSourceMode::Capture : mode == MediaPlayerSourceMode::Direct)) : mode == sourceMode)
+            && ((finished && !restream) || (captureSize == size && captureCodec == codec))
+            && textTracks->size() == tracks.size()
+            && std::equal(textTracks->begin(), textTracks->end(), tracks.begin(), [](auto& a, auto& b) { return a.ptr() == b.ptr(); });
+    }
+
+    void subscribe(std::unique_ptr<MediaPlayerPromise>&& promise)
+    {
+        if (!finished) {
+            pending.append(WTF::move(promise));
+            return;
+        }
+        ASSERT(completedURL && sourceIdentifier);
+        auto identifier = *sourceIdentifier;
+        WebProcess::singleton().parentProcessConnection()->sendWithAsyncReply(Messages::LegacyExtensionHost::ActivateMediaPlayer(identifier), [self = shared_from_this(), identifier, promise = WTF::move(promise)](Expected<bool, String>&& activated) mutable {
+            if (!activated)
+                return promise->complete(makeUnexpected(activated.error()));
+            if (!*activated) {
+                MediaRestreamSession::singleton().stop(identifier, true);
+                return promise->complete(makeUnexpected("no-source"_s));
+            }
+            if (!self->sourceValid() || !self->completedURL || self->sourceIdentifier != identifier
+                || !WebCore::MediaRestreamSource::validateTextTracks(*self->media, *self->textTracks))
+                return promise->complete(makeUnexpected("no-source"_s));
+            promise->restream = self->restream;
+            promise->complete(URL { *self->completedURL });
+        }, 0);
+    }
+
+    void endHandoff()
+    {
+        if (auto identifier = std::exchange(requestIdentifier, 0))
+            WebProcess::singleton().parentProcessConnection()->send(Messages::LegacyExtensionHost::EndMediaPlayerHandoff(identifier), 0);
+    }
+
+    ~MediaPlayerOpenRequest()
+    {
+        stopSourceObservation();
+        if (resolver)
+            JSValueUnprotect(resolverContext.get(), resolver);
+        endHandoff();
+    }
+
+    void complete(Expected<URL, String>&& result)
+    {
+        auto protect = shared_from_this();
+        stopSourceObservation();
+        preparing = nullptr;
+        finished = true;
+        resolvingSource = false;
+        if (media)
+            WebCore::MediaRestreamSource::setPreparingExternalPlayback(*media, presentationIdentifier, false);
+        if (!result && directIdentifier)
+            MediaRestreamSession::singleton().stop(*std::exchange(directIdentifier, std::nullopt), result.error() != "application-start-uncertain"_s);
+        if (!result && media)
+            WebCore::MediaRestreamSource::setExternalPlaybackTarget(*media, presentationIdentifier, false);
+        if (!result && media)
+            media->setMediaPlayerPresentedExternally(false, presentationIdentifier);
+        if (result)
+            completedURL = *result;
+        endHandoff();
+        for (auto& promise : std::exchange(pending, { })) {
+            promise->restream = restream;
+            if (result)
+                promise->complete(URL { *result });
+            else
+                promise->complete(makeUnexpected(result.error()));
+        }
+    }
+
+    void observeSource(uint64_t identifier)
+    {
+        sourceIdentifier = identifier;
+        MediaRestreamSession::singleton().setDidEnd(identifier, [self = shared_from_this(), identifier] {
+            if (self->sourceIdentifier == identifier) {
+                self->sourceIdentifier = std::nullopt;
+                self->completedURL = std::nullopt;
+            }
+        });
+    }
+
+    void start()
+    {
+        requests().push_back(shared_from_this());
+        requestIdentifier = nextMediaPlayerHandoffIdentifier();
+        presentationIdentifier = requestIdentifier;
+        WebProcess::singleton().parentProcessConnection()->sendWithAsyncReply(Messages::LegacyExtensionHost::BeginMediaPlayerHandoff(native.frameID, requestIdentifier, parentHandoffIdentifier, String { }, native.extensionKey), [self = shared_from_this()](Expected<bool, String>&& began) {
+            if (!began)
+                return self->complete(makeUnexpected(began.error()));
+            if (!self->valid())
+                return self->complete(makeUnexpected("no-source"_s));
+            self->media->setMediaPlayerPresentedExternally(true, self->presentationIdentifier, self->openingMessage);
+            self->prepareSource();
+        }, 0);
+    }
+
+    void observeSourceChanges()
+    {
+        negotiating = true;
+        preparing = shared_from_this();
+        sourceListener = MediaPlayerSourceListener::create([weakThis = weak_from_this()] {
+            if (auto self = weakThis.lock())
+                self->sourceChanged();
+        });
+        for (auto& name : { WebCore::eventNames().loadstartEvent, WebCore::eventNames().loadedmetadataEvent, WebCore::eventNames().loadeddataEvent, WebCore::eventNames().canplayEvent, WebCore::eventNames().seekedEvent, WebCore::eventNames().playingEvent, WebCore::eventNames().errorEvent })
+            media->addEventListener(name, Ref { *sourceListener });
+    }
+
+    void stopSourceObservation()
+    {
+        sourceTimer.stop();
+        if (media && sourceListener) {
+            for (auto& name : { WebCore::eventNames().loadstartEvent, WebCore::eventNames().loadedmetadataEvent, WebCore::eventNames().loadeddataEvent, WebCore::eventNames().canplayEvent, WebCore::eventNames().seekedEvent, WebCore::eventNames().playingEvent, WebCore::eventNames().errorEvent })
+                media->removeEventListener(name, *sourceListener, { });
+        }
+        sourceListener = nullptr;
+    }
+
+    void prepareSource()
+    {
+        if (sourceMode == MediaPlayerSourceMode::Capture) {
+            candidates.clear();
+            return next();
+        }
+        if (!candidates.isEmpty() || adapter.isEmpty() || !textTracks->isEmpty() || !WebCore::MediaRestreamSource::canNegotiateRemotePlayback(*media))
+            return next();
+        observeSourceChanges();
+        directIdentifier = MediaRestreamSession::singleton().createDirect(*media, std::isfinite(media->duration()), true);
+        sourceTimer.startOneShot(30_s);
+        WebCore::MediaRestreamSource::setExternalPlaybackTarget(*media, presentationIdentifier, true);
+    }
+
+    void returnToLocalSource()
+    {
+        auto protect = shared_from_this();
+        stopSourceObservation();
+        returningToLocal = true;
+        observeSourceChanges();
+        sourceTimer.startOneShot(15_s);
+        WebCore::MediaRestreamSource::setPreparingExternalPlayback(*media, presentationIdentifier, true);
+        if (directIdentifier)
+            MediaRestreamSession::singleton().stop(*std::exchange(directIdentifier, std::nullopt), true);
+        WebCore::MediaRestreamSource::setExternalPlaybackTarget(*media, presentationIdentifier, false);
+        media->setMediaPlayerPresentedExternally(true, presentationIdentifier, openingMessage);
+        sourceChanged();
+    }
+
+    void sourceDeadline()
+    {
+        auto protect = shared_from_this();
+        if (resolvingSource)
+            return complete(makeUnexpected(resolutionSourceValid() ? "source-resolution-failed"_s : "no-source"_s));
+        if (!valid() || returningToLocal)
+            return complete(makeUnexpected("no-source"_s));
+        returnToLocalSource();
+    }
+
+    void sourceChanged()
+    {
+        if (!negotiating)
+            return;
+        auto protect = shared_from_this();
+        if (!valid())
+            return complete(makeUnexpected("no-source"_s));
+        if (media->error()) {
+            if (!returningToLocal)
+                return returnToLocalSource();
+            return complete(makeUnexpected("unsupported-source"_s));
+        }
+        if (returningToLocal) {
+            if (media->readyState() < WebCore::HTMLMediaElement::HAVE_CURRENT_DATA || media->seeking())
+                return;
+            if (!WebCore::MediaRestreamSource::requiresCapture(*media))
+                return;
+            if (sourceMode == MediaPlayerSourceMode::Direct) {
+                if (RefPtr route = WebCore::MediaRestreamSource::remoteSourceForPlayer(*media->player())) {
+                    route->stop();
+                    if (!initiallyPaused)
+                        media->play();
+                }
+            }
+            if (initiallyPaused && !media->paused())
+                media->pause();
+            if (!initiallyPaused && media->paused()) {
+                if (!std::exchange(restoringPlayIntent, true))
+                    media->play();
+                return;
+            }
+        } else if (WebCore::MediaRestreamSource::requiresCapture(*media))
+            return;
+        stopSourceObservation();
+        negotiating = false;
+        negotiatedRemote = !returningToLocal;
+        preparing = nullptr;
+        player = media->player();
+        sourceURL = media->currentSrc();
+        candidates = negotiatedRemote ? media->externalMediaSourceURLs() : Vector<URL> { };
+        nextCandidate = 0;
+        WebCore::MediaRestreamSource::setPreparingExternalPlayback(*media, presentationIdentifier, false);
+        next();
+    }
+
+    bool sourceValid() const
+    {
+        return media && media->document().identifier() == document
+            && media->document().page() && (negotiating || ((restream || negotiatedRemote) && WebCore::MediaRestreamSource::isPlayingExternally(*media)) || (media->player() == player.get() && media->currentSrc() == sourceURL));
+    }
+
+    bool valid() const { return documentForNative(native) && sourceValid(); }
+    bool resolutionSourceValid() const { return valid() && media->currentSrc() == sourceURL && media->player() == player.get(); }
+
+    void next()
+    {
+        if (!valid()) {
+            if (directIdentifier)
+                MediaRestreamSession::singleton().stop(*directIdentifier, true);
+            return complete(makeUnexpected("no-source"_s));
+        }
+        bool direct = nextCandidate < candidates.size();
+        if (!direct && WebCore::MediaRestreamSource::externalPlaybackTarget(*media))
+            return returnToLocalSource();
+        if (!direct && directIdentifier)
+            MediaRestreamSession::singleton().stop(*std::exchange(directIdentifier, std::nullopt), true);
+        if (!direct && sourceMode == MediaPlayerSourceMode::Direct)
+            return complete(makeUnexpected("no-direct-source"_s));
+        restream = !direct;
+        URL url = direct ? candidates[nextCandidate++] : URL { };
+        if (direct && resolver) {
+            resolvingSource = true;
+            preparing = shared_from_this();
+            sourceTimer.startOneShot(30_s);
+            auto complete = sourceCompletion(resolverContext.get(), [weakThis = weak_from_this(), url](String json) {
+                auto self = weakThis.lock();
+                if (!self || self->finished || !self->resolvingSource)
+                    return;
+                self->sourceTimer.stop();
+                self->resolvingSource = false;
+                self->preparing = nullptr;
+                if (!self->resolutionSourceValid())
+                    return self->complete(makeUnexpected("no-source"_s));
+                auto value = JSON::Value::parseJSON(json);
+                auto source = value ? value->asObject() : nullptr;
+                URL resolved { source ? source->getString("url"_s) : String { } };
+                auto playlist = source ? source->getString("playlist"_s) : String { };
+                if ((source && source->getValue("playlist"_s) && source->getValue("playlist"_s)->type() != JSON::Value::Type::String) || !resolved.protocolIsInHTTPFamily() || playlist.length() > 1024 * 1024 || (!playlist.isEmpty() && !playlist.startsWith("#EXTM3U"_s)))
+                    return self->complete(makeUnexpected("source-resolution-failed"_s));
+                self->launchSource(url, resolved, playlist);
+            });
+            auto urlString = adopt(JSStringCreateWithUTF8CString(url.string().utf8().data()));
+            JSValueRef arguments[] = { JSValueMakeString(resolverContext.get(), urlString.get()), complete };
+            JSValueRef exception = nullptr;
+            JSObjectCallAsFunction(resolverContext.get(), resolver, nullptr, 2, arguments, &exception);
+            if (exception && !finished)
+                this->complete(makeUnexpected("source-resolution-failed"_s));
+            return;
+        }
+        launchSource(url, url, { });
+    }
+
+    void launchSource(const URL& source, const URL& url, const String& playlist)
+    {
+        bool direct = !source.isEmpty();
+        bool matchingTimeline = source == sourceURL && std::isfinite(media->duration());
+        double position = negotiatedRemote ? initialPosition : matchingTimeline ? media->currentTime() : 0;
+        double rate = negotiatedRemote ? initialRate : media->playbackRate();
+        bool paused = negotiatedRemote ? initiallyPaused : WebCore::MediaRestreamSource::handoffPaused(*media);
+        auto launch = [self = shared_from_this(), source, url, playlist, position, rate, paused](Expected<uint64_t, String>&& created) mutable {
+            if (!created)
+                return self->complete(makeUnexpected(created.error()));
+            auto identifier = *created;
+            if (!self->valid()) {
+                MediaRestreamSession::singleton().stop(identifier, true);
+                return self->complete(makeUnexpected("no-source"_s));
+            }
+            self->observeSource(identifier);
+            Ref document = *documentForNative(self->native);
+            WebProcess::singleton().parentProcessConnection()->sendWithAsyncReply(Messages::LegacyExtensionHost::OpenInMediaPlayer(self->native.frameID, self->native.documentIdentifier, document->url(), self->native.extensionKey, self->application, self->requestIdentifier, identifier, url, playlist, self->title, self->adapter, source.isEmpty() ? self->captureCodec : String { }, position, rate, paused), [self, identifier, source, direct = !source.isEmpty()](IPC::Connection* connection, Expected<URL, String>&& result) mutable {
+                if (!connection)
+                    result = makeUnexpected("application-unavailable"_s);
+                if (!self->valid() || !MediaRestreamSession::singleton().contains(identifier))
+                    result = makeUnexpected("no-source"_s);
+                if (!result) {
+                    if (direct && result.error() == "unsupported-source"_s && self->valid() && MediaRestreamSession::singleton().contains(identifier))
+                        return self->next();
+                    MediaRestreamSession::singleton().stop(identifier, result.error() != "application-start-uncertain"_s);
+                } else
+                    MediaRestreamSession::singleton().accept(identifier, source);
+                self->complete(WTF::move(result));
+            }, 0);
+        };
+        if (direct) {
+            if (!directIdentifier)
+                directIdentifier = MediaRestreamSession::singleton().createDirect(*media, matchingTimeline);
+            launch(*directIdentifier);
+        } else
+            MediaRestreamSession::singleton().create(*media, textTracks, captureSize, captureCodec, WTF::move(launch));
+    }
+};
+
+static JSValueRef contentContextOpenInMediaPlayer(JSContextRef context, JSObjectRef, JSObjectRef thisObject, size_t argumentCount, const JSValueRef arguments[], JSValueRef* exception)
 {
     JSObjectRef resolve;
     JSObjectRef reject;
     auto promise = JSObjectMakeDeferredPromise(context, &resolve, &reject, exception);
     if (!promise)
         return JSValueMakeUndefined(context);
-    auto pending = std::make_unique<QuickTimePromise>(context, resolve, reject);
+    auto pending = std::make_unique<MediaPlayerPromise>(context, resolve, reject);
     auto* native = static_cast<ContentContextNative*>(JSObjectGetPrivate(thisObject));
     RefPtr document = documentForNative(*native);
     auto* globalObject = toJS(context);
     JSC::JSLockHolder lock(globalObject->vm());
     RefPtr media = argumentCount ? dynamicDowncast<WebCore::HTMLMediaElement>(WebCore::JSElement::toWrapped(globalObject->vm(), toJS(globalObject, arguments[0]))) : nullptr;
-    if (!document || !media || !document->securityOrigin().isSameOriginDomain(media->document().securityOrigin()) || media->currentSrc().isEmpty()) {
+    if (!document || !media || !document->securityOrigin().isSameOriginDomain(media->document().securityOrigin())) {
         pending->complete(makeUnexpected("no-source"_s));
         return promise;
     }
-    if (!media->currentSrc().protocolIsInHTTPFamily()) {
+    pending->caller = *native;
+    auto parentHandoff = parentMediaPlayerHandoff(context, argumentCount, arguments, 8, *native);
+    if (!parentHandoff) {
+        pending->complete(makeUnexpected("no-source"_s));
+        return promise;
+    }
+    auto application = LegacyExtensions::stringArgument(context, argumentCount, arguments, 1);
+    if (application.isEmpty()) {
+        pending->complete(makeUnexpected("application-unavailable"_s));
+        return promise;
+    }
+    auto targetDocument = media->document().identifier();
+    std::optional<Vector<Ref<WebCore::TextTrack>>> textTracks;
+    if (argumentCount > 2 && !JSValueIsUndefined(context, arguments[2])) {
+        if (!JSValueIsArray(context, arguments[2])) {
+            pending->complete(makeUnexpected("unsupported-source"_s));
+            return promise;
+        }
+        textTracks.emplace();
+        auto array = JSValueToObject(context, arguments[2], nullptr);
+        auto lengthName = adopt(JSStringCreateWithUTF8CString("length"));
+        JSValueRef propertyError = nullptr;
+        auto lengthValue = JSObjectGetProperty(context, array, lengthName.get(), &propertyError);
+        double length = propertyError ? -1 : JSValueToNumber(context, lengthValue, &propertyError);
+        if (propertyError || !std::isfinite(length) || length < 0 || length > WebCore::MediaRestreamSource::textTrackCount(*media) || length != std::floor(length)) {
+            pending->complete(makeUnexpected("unsupported-source"_s));
+            return promise;
+        }
+        HashSet<WebCore::TextTrack*> selected;
+        for (unsigned i = 0; i < length; ++i) {
+            JSValueRef error = nullptr;
+            auto value = JSObjectGetPropertyAtIndex(context, array, i, &error);
+            auto* track = error ? nullptr : WebCore::JSTextTrack::toWrapped(globalObject->vm(), toJS(globalObject, value));
+            if (!track || !selected.add(track).isNewEntry) {
+                pending->complete(makeUnexpected("unsupported-source"_s));
+                return promise;
+            }
+            textTracks->append(Ref { *track });
+        }
+        if (!WebCore::MediaRestreamSource::validateTextTracks(*media, *textTracks)) {
+            pending->complete(makeUnexpected("unsupported-source"_s));
+            return promise;
+        }
+    }
+    if (documentForNative(*native) != document || !media->document().page() || media->document().identifier() != targetDocument
+        || !document->securityOrigin().isSameOriginDomain(media->document().securityOrigin())) {
+        pending->complete(makeUnexpected("no-source"_s));
+        return promise;
+    }
+    if (!media->player()) {
+        pending->complete(makeUnexpected("no-source"_s));
+        return promise;
+    }
+    auto adapter = LegacyExtensions::stringArgument(context, argumentCount, arguments, 3);
+    auto mode = LegacyExtensions::stringArgument(context, argumentCount, arguments, 7);
+    MediaPlayerSourceMode sourceMode;
+    if (mode == "auto"_s)
+        sourceMode = MediaPlayerSourceMode::Auto;
+    else if (mode == "direct"_s)
+        sourceMode = MediaPlayerSourceMode::Direct;
+    else if (mode == "capture"_s)
+        sourceMode = MediaPlayerSourceMode::Capture;
+    else {
         pending->complete(makeUnexpected("unsupported-source"_s));
         return promise;
     }
-    URL source = media->currentSrc();
-    WebProcess::singleton().parentProcessConnection()->sendWithAsyncReply(Messages::LegacyExtensionHost::OpenInQuickTimePlayer(native->frameID, native->documentIdentifier, document->url(), native->extensionKey, source), [pending = WTF::move(pending), media = WeakPtr { *media }, native = *native, targetDocument = media->document().identifier(), source](IPC::Connection* connection, Expected<URL, String>&& result) mutable {
-        if (!connection)
-            return pending->complete(makeUnexpected("quicktime-unavailable"_s));
-        if (!documentForNative(native) || !media || media->document().identifier() != targetDocument || media->currentSrc() != source)
-            return pending->complete(makeUnexpected("no-source"_s));
-        if (result)
-            media->pause();
-        pending->complete(WTF::move(result));
-    }, 0);
+    WebCore::IntSize captureSize;
+    String captureCodec;
+    auto capture = LegacyExtensions::stringArgument(context, argumentCount, arguments, 9);
+    if (!capture.isEmpty()) {
+        auto value = JSON::Value::parseJSON(capture);
+        auto object = value ? value->asObject() : nullptr;
+        auto width = object ? object->getDouble("maxWidth"_s) : std::nullopt;
+        auto height = object ? object->getDouble("maxHeight"_s) : std::nullopt;
+        auto validDimension = [](auto value) { return value && std::isfinite(*value) && *value >= 2 && *value <= 16384 && *value == std::floor(*value); };
+        if (!validDimension(width) || !validDimension(height)) {
+            pending->complete(makeUnexpected("unsupported-source"_s));
+            return promise;
+        }
+        captureSize = { static_cast<int>(*width), static_cast<int>(*height) };
+        auto transport = object->getString("transport"_s);
+        auto codec = object->getString("videoCodec"_s);
+        if (transport == "rtsp"_s && (codec == "utvideo"_s || codec == "jpeg"_s))
+            captureCodec = codec;
+        else if (transport != "hls"_s || codec != "h264"_s) {
+            pending->complete(makeUnexpected("unsupported-source"_s));
+            return promise;
+        }
+    }
+    auto effectiveTracks = WebCore::MediaRestreamSource::selectedTextTracks(*media, textTracks);
+    auto& requests = MediaPlayerOpenRequest::requests();
+    std::erase_if(requests, [](auto& request) { return request.expired(); });
+    for (auto& weakRequest : requests) {
+        auto request = weakRequest.lock();
+        if (!request || !request->sourceValid() || request->media.get() != media.get() || (request->finished && !request->completedURL))
+            continue;
+        if (request->matches(*native, application, adapter, effectiveTracks, sourceMode, captureSize, captureCodec))
+            request->subscribe(WTF::move(pending));
+        else if (sourceMode == MediaPlayerSourceMode::Direct && request->finished && request->restream
+            && request->matches(*native, application, adapter, effectiveTracks, MediaPlayerSourceMode::Auto, captureSize, captureCodec))
+            pending->complete(makeUnexpected("no-direct-source"_s));
+        else
+            pending->complete(makeUnexpected("application-busy"_s));
+        return promise;
+    }
+    textTracks = WTF::move(effectiveTracks);
+    auto title = argumentCount > 4 && JSValueIsString(context, arguments[4]) ? LegacyExtensions::stringArgument(context, argumentCount, arguments, 4) : String { };
+    auto message = argumentCount > 5 && JSValueIsString(context, arguments[5]) ? LegacyExtensions::stringArgument(context, argumentCount, arguments, 5) : emptyString();
+    auto request = std::make_shared<MediaPlayerOpenRequest>(WTF::move(pending), *native, *media, application, title.left(1024), message.left(1024), adapter, WTF::move(textTracks));
+    request->sourceMode = sourceMode;
+    request->captureSize = captureSize;
+    request->captureCodec = captureCodec;
+    request->parentHandoffIdentifier = *parentHandoff;
+    if (argumentCount > 6 && JSValueIsObject(context, arguments[6])) {
+        auto resolver = JSValueToObject(context, arguments[6], nullptr);
+        if (JSObjectIsFunction(context, resolver)) {
+            request->resolverContext = JSContextGetGlobalContext(context);
+            request->resolver = resolver;
+            JSValueProtect(context, resolver);
+        }
+    }
+    request->start();
     return promise;
 }
 
@@ -247,6 +800,106 @@ struct NativePromise {
         JSObjectCallAsFunction(context.get(), reject, nullptr, 1, &error, nullptr);
     }
 };
+
+struct MediaPlayerHandoffScope : std::enable_shared_from_this<MediaPlayerHandoffScope> {
+    ContentContextNative native;
+    std::unique_ptr<NativePromise> promise;
+    JSObjectRef callback;
+    uint64_t identifier { nextMediaPlayerHandoffIdentifier() };
+    uint64_t parentIdentifier;
+    String ticket;
+    RunLoop::Timer deadline;
+    std::shared_ptr<MediaPlayerHandoffScope> active;
+    bool finished { false };
+
+    MediaPlayerHandoffScope(const ContentContextNative& context, std::unique_ptr<NativePromise>&& pending, JSObjectRef operation, uint64_t parent, String&& preparedTicket)
+        : native(context), promise(WTF::move(pending)), callback(operation), parentIdentifier(parent), ticket(WTF::move(preparedTicket))
+        , deadline(RunLoop::mainSingleton(), "External playback selection"_s, [this] { complete("handoff-timeout"_s); })
+    {
+        JSValueProtect(promise->context.get(), callback);
+    }
+
+    static std::vector<std::weak_ptr<MediaPlayerHandoffScope>>& scopes()
+    {
+        static NeverDestroyed<std::vector<std::weak_ptr<MediaPlayerHandoffScope>>> scopes;
+        return scopes;
+    }
+
+    ~MediaPlayerHandoffScope()
+    {
+        JSValueUnprotect(promise->context.get(), callback);
+    }
+
+    void complete(const String& error = { })
+    {
+        if (std::exchange(finished, true))
+            return;
+        auto protect = shared_from_this();
+        deadline.stop();
+        active = nullptr;
+        if (error.isEmpty())
+            promise->resolveWith(JSValueMakeUndefined(promise->context.get()));
+        else
+            promise->rejectWith(error);
+        WebProcess::singleton().parentProcessConnection()->send(Messages::LegacyExtensionHost::EndMediaPlayerHandoff(identifier), 0);
+    }
+
+    void start()
+    {
+        active = shared_from_this();
+        std::erase_if(scopes(), [](auto& scope) { return scope.expired(); });
+        scopes().push_back(active);
+        deadline.startOneShot(5_min);
+        WebProcess::singleton().parentProcessConnection()->sendWithAsyncReply(Messages::LegacyExtensionHost::BeginMediaPlayerHandoff(native.frameID, identifier, parentIdentifier, ticket, native.extensionKey), [self = shared_from_this()](Expected<bool, String>&& began) {
+            if (self->finished)
+                return;
+            if (!began)
+                return self->complete(began.error());
+            if (!*began || !documentForNative(self->native))
+                return self->complete("no-source"_s);
+            JSValueRef finish = sourceCompletion(self->promise->context.get(), [weakThis = self->weak_from_this()](String) {
+                if (auto scope = weakThis.lock())
+                    scope->complete();
+            });
+            JSValueRef exception = nullptr;
+            auto identifierString = adopt(JSStringCreateWithUTF8CString(String::number(self->identifier).utf8().data()));
+            JSValueRef arguments[] = { finish, JSValueMakeString(self->promise->context.get(), identifierString.get()) };
+            JSObjectCallAsFunction(self->promise->context.get(), self->callback, nullptr, 2, arguments, &exception);
+            if (exception)
+                self->complete("handoff-failed"_s);
+        }, 0);
+    }
+};
+
+static bool activeMediaPlayerHandoffScope(const ContentContextNative& native, uint64_t identifier)
+{
+    return std::any_of(MediaPlayerHandoffScope::scopes().begin(), MediaPlayerHandoffScope::scopes().end(), [&](auto& weakScope) {
+        auto scope = weakScope.lock();
+        return scope && !scope->finished && scope->identifier == identifier && scope->native.frameID == native.frameID
+            && scope->native.documentIdentifier == native.documentIdentifier && scope->native.extensionKey == native.extensionKey
+            && documentForNative(scope->native);
+    });
+}
+
+static JSValueRef contentContextWithMediaPlayerHandoff(JSContextRef context, JSObjectRef, JSObjectRef thisObject, size_t argumentCount, const JSValueRef arguments[], JSValueRef* exception)
+{
+    JSObjectRef resolve;
+    JSObjectRef reject;
+    auto promise = JSObjectMakeDeferredPromise(context, &resolve, &reject, exception);
+    if (!promise)
+        return JSValueMakeUndefined(context);
+    auto pending = std::make_unique<NativePromise>(context, resolve, reject);
+    auto* native = static_cast<ContentContextNative*>(JSObjectGetPrivate(thisObject));
+    auto callback = argumentCount && JSValueIsObject(context, arguments[0]) ? JSValueToObject(context, arguments[0], nullptr) : nullptr;
+    auto parent = parentMediaPlayerHandoff(context, argumentCount, arguments, 1, *native);
+    if (!parent || !documentForNative(*native) || !callback || !JSObjectIsFunction(context, callback)) {
+        pending->rejectWith("no-source"_s);
+        return promise;
+    }
+    auto ticket = LegacyExtensions::stringArgument(context, argumentCount, arguments, 2);
+    std::make_shared<MediaPlayerHandoffScope>(*native, WTF::move(pending), callback, *parent, WTF::move(ticket))->start();
+    return promise;
+}
 
 // mimeHandler: the document whose handler page is the context's own, the extension's page in a frame.
 static RefPtr<WebCore::LegacyExtensionMimeHandlerDocument> mimeHandlerDocument(const ContentContextNative& native)
@@ -333,7 +986,8 @@ static JSClassRef contentContextNativeClass(LegacyExtensions::ContextKind kind)
 {
     static JSClassRef contentClass = [] {
         static const JSStaticFunction functions[] = {
-            { "openInQuickTimePlayer", contentContextOpenInQuickTimePlayer, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
+            { "openInMediaPlayer", contentContextOpenInMediaPlayer, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
+            { "withMediaPlayerHandoff", contentContextWithMediaPlayerHandoff, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
             { "send", contentContextSend, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
             { "insertCSS", contentContextInsertCSS, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
             { "removeCSS", contentContextRemoveCSS, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },

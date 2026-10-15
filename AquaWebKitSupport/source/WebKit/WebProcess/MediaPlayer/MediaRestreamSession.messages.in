@@ -1,0 +1,14 @@
+[
+    DispatchedFrom=UI,
+    DispatchedTo=WebContent,
+    ExceptionForEnabledBy
+]
+messages -> MediaRestreamSession {
+    StreamDescription(uint64_t identifier) -> (String description)
+    NextFrame(uint64_t identifier, bool video) -> (String caps, uint64_t time, uint64_t duration, std::optional<IPC::SharedBufferReference> data)
+    Playlist(uint64_t identifier, String resource) -> (String playlist)
+    Segment(uint64_t identifier, uint64_t request, uint64_t index) -> (std::optional<IPC::SharedBufferReference> data)
+    PlaybackState(uint64_t identifier, double position, double duration, double rate)
+    Cancel(uint64_t identifier, uint64_t request)
+    Stop(uint64_t identifier, bool returnToInline, std::optional<double> position)
+}

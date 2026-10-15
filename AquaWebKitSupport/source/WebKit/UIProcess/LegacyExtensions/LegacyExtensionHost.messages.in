@@ -6,6 +6,11 @@
     ExceptionForEnabledBy
 ]
 messages -> LegacyExtensionHost {
-    OpenInQuickTimePlayer(WebCore::FrameIdentifier frameID, WebCore::ScriptExecutionContextIdentifier documentID, URL documentURL, String extensionKey, URL url) -> (Expected<URL, String> result)
+    BeginMediaPlayerHandoff(WebCore::FrameIdentifier frameID, uint64_t request, uint64_t parent, String ticket, String extensionKey) -> (Expected<bool, String> began)
+    ControlMediaPlayer(uint64_t identifier, String command, double value) -> (bool succeeded)
+    EndMediaPlayerHandoff(uint64_t request)
+    OpenInMediaPlayer(WebCore::FrameIdentifier frameID, WebCore::ScriptExecutionContextIdentifier documentID, URL documentURL, String extensionKey, String application, uint64_t request, uint64_t identifier, URL directURL, String playlist, String title, String adapter, String captureCodec, double position, double rate, bool paused) -> (Expected<URL, String> result)
+    ActivateMediaPlayer(uint64_t identifier) -> (Expected<bool, String> activated)
+    EndRestream(uint64_t identifier)
     Post(WebCore::FrameIdentifier frameID, WebCore::ScriptExecutionContextIdentifier documentID, URL documentURL, String extensionKey, String message, IPC::SharedBufferReference data)
 }

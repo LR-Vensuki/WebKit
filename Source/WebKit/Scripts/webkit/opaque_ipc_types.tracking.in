@@ -395,6 +395,10 @@
 [SafeWrapper] StructureParam WebModel::ImageAsset.dataHandle std::optional<WebCore::SharedMemory::Handle>
 
 [UnsafeWrapper] std::optional<IPC::SharedBufferReference> {
+    # AQUAWEBKIT: owning WebContent media bytes are copied to the loopback HTTP response without parsing in the UI process.
+    [UnsafeWrapper] MessageParamReply MediaRestreamSession.Segment data
+    # AQUAWEBKIT: bounded encoded media samples are packetized for the loopback RTP receiver.
+    [UnsafeWrapper] MessageParamReply MediaRestreamSession.NextFrame data
     [Legacy] MessageParamReply WebPage.GetMainResourceDataOfFrame buffer
     [Legacy] MessageParamReply WebPage.GetResourceDataFromFrame buffer
     [Legacy] MessageParamReply WebPage.GetAccessibilityTreeData dataReference

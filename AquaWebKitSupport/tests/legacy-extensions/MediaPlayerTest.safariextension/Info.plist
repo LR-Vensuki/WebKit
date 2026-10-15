@@ -7,9 +7,9 @@
 	<key>Builder Version</key>
 	<string>9537.78.2</string>
 	<key>CFBundleDisplayName</key>
-	<string>Send to QuickTime</string>
+	<string>Media Player API Test</string>
 	<key>CFBundleIdentifier</key>
-	<string>org.aquawebkit.SendToQuickTime</string>
+	<string>org.aqua.webkit.media-player-test</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleShortVersionString</key>
@@ -20,21 +20,6 @@
 	<dict>
 		<key>Global Page</key>
 		<string>global.html</string>
-		<key>Toolbar Items</key>
-		<array>
-			<dict>
-				<key>Command</key>
-				<string>send-to-quicktime</string>
-				<key>Identifier</key>
-				<string>send-to-quicktime</string>
-				<key>Image</key>
-				<string>button.pdf</string>
-				<key>Label</key>
-				<string>QuickTime</string>
-				<key>Tool Tip</key>
-				<string>Open Video in QuickTime Player</string>
-			</dict>
-		</array>
 	</dict>
 	<key>Content</key>
 	<dict>
@@ -47,19 +32,21 @@
 		</dict>
 	</dict>
 	<key>Description</key>
-	<string>Open a page’s video in QuickTime Player.</string>
-	<key>DeveloperIdentifier</key>
-	<string>WDAOQFIKHZ</string>
+	<string>Local media handoff test controls</string>
 	<key>ExtensionInfoDictionaryVersion</key>
 	<string>1.0</string>
 	<key>Permissions</key>
 	<dict>
 		<key>Website Access</key>
 		<dict>
+			<key>Allowed Domains</key>
+			<array>
+				<string>127.0.0.1</string>
+			</array>
 			<key>Include Secure Pages</key>
-			<true/>
+			<false/>
 			<key>Level</key>
-			<string>All</string>
+			<string>Some</string>
 		</dict>
 	</dict>
 </dict>

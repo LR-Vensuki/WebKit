@@ -977,8 +977,65 @@ function receiverTable() {
 }
 
 const aqua = {};
-if (typeof native.openInQuickTimePlayer === "function")
-    aqua.quickTimePlayer = { open: element => native.openInQuickTimePlayer(element) };
+if (typeof native.openInMediaPlayer === "function") {
+    const openMediaPlayer = (element, options = {}, parent) => {
+        const sourceMode = options.sourceMode === undefined ? "auto" : options.sourceMode;
+        if (!["auto", "direct", "capture"].includes(sourceMode))
+            return Promise.reject(new TypeError("sourceMode must be auto, direct, or capture"));
+        if (options.resolveSource !== undefined && typeof options.resolveSource !== "function")
+            return Promise.reject(new TypeError("resolveSource must be a function"));
+        let capture = "";
+        if (options.capture !== undefined) {
+            if (!options.capture || typeof options.capture !== "object")
+                return Promise.reject(new TypeError("capture must be an object"));
+            const { maxWidth = 3840, maxHeight = 2160, transport = "hls", videoCodec = "h264" } = options.capture;
+            if (!(transport === "hls" && videoCodec === "h264") && !(transport === "rtsp" && ["jpeg", "utvideo"].includes(videoCodec)))
+                return Promise.reject(new TypeError("Unsupported capture transport or video codec"));
+            if (![maxWidth, maxHeight].every(value => Number.isInteger(value) && value >= 2 && value <= 16384))
+                return Promise.reject(new TypeError("capture.maxWidth and capture.maxHeight must be integers between 2 and 16384"));
+            capture = JSON.stringify({ maxWidth, maxHeight, transport, videoCodec });
+        }
+        const resolveSource = options.resolveSource && ((url, complete) => {
+            Promise.resolve().then(() => options.resolveSource(url)).then(source => {
+                complete(JSON.stringify(source === undefined ? { url } : source));
+            }).catch(() => complete(""));
+        });
+        return native.openInMediaPlayer(element, options.application, options.textTracks, options.adapter === undefined ? "" : JSON.stringify(options.adapter), options.title, options.openingMessage, resolveSource, sourceMode, parent, capture);
+    };
+    const withHandoff = async (callback, parent, ticket) => {
+        if (typeof callback !== "function")
+            throw new TypeError("withHandoff requires a function");
+        let value, error, failed = false;
+        const controller = new AbortController();
+        try {
+            await native.withMediaPlayerHandoff((complete, identifier) => {
+                const scope = {
+                    signal: controller.signal,
+                    open: (element, options) => openMediaPlayer(element, options, identifier),
+                    withHandoff: callback => withHandoff(callback, identifier),
+                };
+                Promise.resolve().then(() => callback(scope)).then(result => {
+                    value = result;
+                    complete();
+                }, reason => {
+                    error = reason;
+                    failed = true;
+                    complete();
+                });
+            }, parent, ticket);
+            if (failed)
+                throw error;
+            return value;
+        } finally {
+            controller.abort();
+        }
+    };
+    aqua.mediaPlayer = { open: (element, options) => openMediaPlayer(element, options), withHandoff: (callback, options = {}) => {
+        if (options.ticket !== undefined && (typeof options.ticket !== "string" || !options.ticket.length))
+            return Promise.reject(new TypeError("A handoff ticket must be a string"));
+        return withHandoff(callback, undefined, options.ticket);
+    } };
+}
 if (isHost) {
     // A tab is a tab ID, or where Safari's extension API is, a SafariBrowserTab, which the router finds at its
     // place in safari.application.browserWindows.
@@ -995,6 +1052,10 @@ if (isHost) {
         throw new TypeError("A tab is a tab ID or a SafariBrowserTab of an open window.");
     };
     const tabReferences = tabs => (Array.isArray(tabs) ? tabs : [tabs]).map(tabReference);
+    aqua.mediaPlayer = Object.assign(aqua.mediaPlayer || {}, {
+        prepareHandoff: tab => callRouter("aqua.mediaPlayer.prepareHandoff", tabReference(tab)),
+        cancelHandoff: ticket => callRouter("aqua.mediaPlayer.cancelHandoff", ticket),
+    });
     aqua.tabs = {
         hide(...args) {
             return withOptionalCallback(args, async tabs => callRouter("aqua.tabs.hide", tabReferences(tabs)));

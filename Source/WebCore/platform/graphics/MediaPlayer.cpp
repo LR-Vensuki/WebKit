@@ -25,6 +25,7 @@
 
 #include "config.h"
 #include "MediaPlayer.h"
+#include "MediaRestreamSource.h" // AQUAWEBKIT: external application transport retains the media element’s controls and clock.
 
 #if ENABLE(VIDEO)
 
@@ -768,11 +769,15 @@ void MediaPlayer::prepareToPlay()
 
 void MediaPlayer::play()
 {
+    if (MediaRestreamSource::remoteSourceForPlayer(*this)) // AQUAWEBKIT: local decoder state changes leave the external transport untouched.
+        return;
     protect(m_private)->play();
 }
 
 void MediaPlayer::pause()
 {
+    if (MediaRestreamSource::remoteSourceForPlayer(*this)) // AQUAWEBKIT: local decoder state changes leave the external transport untouched.
+        return;
     protect(m_private)->pause();
 }
 
@@ -834,6 +839,8 @@ void MediaPlayer::setShouldContinueAfterKeyNeeded(bool should)
 
 MediaTime MediaPlayer::duration() const
 {
+    if (auto* route = MediaRestreamSource::remoteSourceForPlayer(*this)) // AQUAWEBKIT: the selected external receiver owns this operation.
+        return route->remoteDuration();
     return protect(m_private)->duration();
 }
 
@@ -849,11 +856,15 @@ MediaTime MediaPlayer::initialTime() const
 
 MediaTime MediaPlayer::currentTime() const
 {
+    if (auto* route = MediaRestreamSource::remoteSourceForPlayer(*this)) // AQUAWEBKIT: the selected external receiver owns this operation.
+        return route->remoteTime();
     return protect(m_private)->currentTime();
 }
 
 bool MediaPlayer::timeIsProgressing() const
 {
+    if (auto* route = MediaRestreamSource::remoteSourceForPlayer(*this)) // AQUAWEBKIT: the selected external receiver owns this operation.
+        return !route->remotePaused() && route->remoteRate();
     return protect(m_private)->timeIsProgressing();
 }
 
@@ -869,11 +880,15 @@ MediaTime MediaPlayer::getStartDate() const
 
 void MediaPlayer::willSeekToTarget(const MediaTime& time)
 {
+    if (MediaRestreamSource::remoteSourceForPlayer(*this)) // AQUAWEBKIT: the selected external receiver owns this operation.
+        return;
     protect(m_private)->willSeekToTarget(time);
 }
 
 Ref<MediaTimePromise> MediaPlayer::seekToTarget(const SeekTarget& target)
 {
+    if (auto* route = MediaRestreamSource::remoteSourceForPlayer(*this)) // AQUAWEBKIT: the selected external receiver owns this operation.
+        return route->remoteSeek(target.time);
     RefPtr playerPrivate = m_private;
     playerPrivate->willSeekToTarget(MediaTime::invalidTime());
     return playerPrivate->seekToTarget(target);
@@ -894,6 +909,8 @@ void MediaPlayer::seekWhenPossible(const MediaTime& time)
 
 bool MediaPlayer::paused() const
 {
+    if (auto* route = MediaRestreamSource::remoteSourceForPlayer(*this)) // AQUAWEBKIT: the selected external receiver owns this operation.
+        return route->remotePaused();
     return protect(m_private)->paused();
 }
 
@@ -1042,11 +1059,15 @@ String MediaPlayer::errorLog() const
 
 MediaPlayer::NetworkState MediaPlayer::networkState()
 {
+    if (auto* route = MediaRestreamSource::remoteSourceForPlayer(*this)) // AQUAWEBKIT: the selected receiver owns media delivery.
+        return route->remoteReady() ? NetworkState::Loaded : NetworkState::Loading;
     return protect(m_private)->networkState();
 }
 
 MediaPlayer::ReadyState MediaPlayer::readyState() const
 {
+    if (auto* route = MediaRestreamSource::remoteSourceForPlayer(*this)) // AQUAWEBKIT: receiver readiness is independent of the paused local decoder.
+        return route->remoteReady() ? ReadyState::HaveEnoughData : ReadyState::HaveMetadata;
     return protect(m_private)->readyState();
 }
 
@@ -1090,16 +1111,22 @@ void MediaPlayer::setClosedCaptionsVisible(bool closedCaptionsVisible)
 
 double MediaPlayer::rate() const
 {
+    if (auto* route = MediaRestreamSource::remoteSourceForPlayer(*this)) // AQUAWEBKIT: the selected external receiver owns this operation.
+        return route->remoteRate();
     return protect(m_private)->rate();
 }
 
 void MediaPlayer::setRate(double rate)
 {
+    if (MediaRestreamSource::remoteSourceForPlayer(*this)) // AQUAWEBKIT: local decoder state changes leave the external transport untouched.
+        return;
     protect(m_private)->setRateDouble(rate);
 }
 
 double MediaPlayer::effectiveRate() const
 {
+    if (auto* route = MediaRestreamSource::remoteSourceForPlayer(*this)) // AQUAWEBKIT: the selected external receiver owns this operation.
+        return route->remotePaused() ? 0 : route->remoteRate();
     return protect(m_private)->effectiveRate();
 }
 
@@ -1136,16 +1163,22 @@ const PlatformTimeRanges& MediaPlayer::buffered() const
 
 const PlatformTimeRanges& MediaPlayer::seekable() const
 {
+    if (auto* route = MediaRestreamSource::remoteSourceForPlayer(*this)) // AQUAWEBKIT: the selected external receiver owns this operation.
+        return route->remoteSeekable();
     return protect(m_private)->seekable();
 }
 
 MediaTime MediaPlayer::maxTimeSeekable() const
 {
+    if (auto* route = MediaRestreamSource::remoteSourceForPlayer(*this)) // AQUAWEBKIT: the selected external receiver owns this operation.
+        return route->remoteDuration().isFinite() ? route->remoteDuration() : MediaTime::zeroTime();
     return protect(m_private)->maxTimeSeekable();
 }
 
 MediaTime MediaPlayer::minTimeSeekable() const
 {
+    if (MediaRestreamSource::remoteSourceForPlayer(*this)) // AQUAWEBKIT: the selected external receiver owns this operation.
+        return MediaTime::zeroTime();
     return protect(m_private)->minTimeSeekable();
 }
 
@@ -1562,6 +1595,8 @@ void MediaPlayer::setPrivateBrowsingMode(bool privateBrowsingMode)
 // Client callbacks.
 void MediaPlayer::networkStateChanged()
 {
+    if (MediaRestreamSource::remoteSourceForPlayer(*this)) // AQUAWEBKIT: local decoder failures do not terminate an external route.
+        return;
     RefPtr playerPrivate = m_private;
     if (playerPrivate->networkState() >= MediaPlayer::NetworkState::FormatError)
         m_lastErrorMessage = playerPrivate->errorMessage();

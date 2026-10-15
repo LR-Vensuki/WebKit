@@ -1996,7 +1996,8 @@ public:
 
 #if PLATFORM(MAC)
     // AQUAWEBKIT: opens media URLs from navigation policy and extension hand-offs in QuickTime Player.
-    bool openURLInQuickTimePlayer(const URL&);
+    bool openURLInMediaPlayer(const URL&, const String& application);
+    void detachMediaPlayerTab(); // AQUAWEBKIT: releases Safari clients and inspectors while the media producer lives.
 #endif
 
 #if ENABLE(PDF_PLUGIN) && PLATFORM(MAC)

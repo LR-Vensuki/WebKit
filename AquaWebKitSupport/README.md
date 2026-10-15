@@ -203,4 +203,4 @@ archive extraction, rejection of tampered CRX3 data and malformed MAR indexes, a
 Use [the castLabs VMP lab](https://castlabs.github.io/wv-vmp-lab/) in Safari for the integration check:
 the license response must report `PLATFORM_SOFTWARE_VERIFIED`, and media time must advance.
 
-`extensions/SendToQuickTime.safariextension/` provides a toolbar button and video context menu for `aqua.quickTimePlayer.open`; load it with Safari 7’s Extension Builder.
+`aqua.mediaPlayer.open(video, { application })` lets extensions hand video playback to an installed macOS application. See [the API guide](docs/MV2-COMPATIBILITY-API.md#the-aqua-namespace).

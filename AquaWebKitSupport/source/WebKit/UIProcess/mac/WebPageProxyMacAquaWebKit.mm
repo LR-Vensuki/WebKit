@@ -19,12 +19,12 @@
 namespace WebKit {
 
 // Navigation policy and extension hand-offs use LaunchServices to deliver a GetURL Apple event.
-bool WebPageProxy::openURLInQuickTimePlayer(const URL& url)
+bool WebPageProxy::openURLInMediaPlayer(const URL& url, const String& application)
 {
-    if (!url.protocolIsInHTTPFamily())
+    if (!url.protocolIsInHTTPFamily() || application.isEmpty())
         return false;
 
-    return [[NSWorkspace sharedWorkspace] openURLs:@[url.createNSURL().get()] withAppBundleIdentifier:@"com.apple.QuickTimePlayerX" options:NSWorkspaceLaunchAsync additionalEventParamDescriptor:nil launchIdentifiers:nullptr];
+    return [[NSWorkspace sharedWorkspace] openURLs:@[url.createNSURL().get()] withAppBundleIdentifier:application.createNSString().get() options:NSWorkspaceLaunchAsync additionalEventParamDescriptor:nil launchIdentifiers:nullptr];
 }
 
 #if ENABLE(ENCRYPTED_MEDIA) && USE(GSTREAMER)
