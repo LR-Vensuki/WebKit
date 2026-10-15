@@ -115,10 +115,26 @@ nm -m -u "$F" | awk '/\(from WebKit\)$/ {print $(NF-2)}' | sort -u > safari9-nee
 The checked-in lists were taken from the payload of Apple's `Safari9.1.3Mavericks.pkg` with
 `llvm-objdump --macho --bind --lazy-bind`, which gives the same 627.
 
-## Still to verify on 10.9
+## Tested on 10.9
 
-The comparisons above are static. On a 10.9.5 machine with Safari 9.1.3 and this port installed:
-launch and browsing in several tabs; back/forward and session restore after relaunch; downloads, and
-resuming a stopped one; JavaScript alert, confirm and prompt; History, Top Sites and the tab view;
-Preferences ▸ Privacy ▸ Details (the origin-data manager) and Remove All Website Data; Reader;
-Develop ▸ Show Web Inspector; Safari extensions.
+In a 10.9.5 virtual machine with Safari 9.1.3 and this port installed, on a Penryn CPU model with and
+without RDTSCP and SSE4.2 (no AVX either way):
+
+- Sites, with no WebContent crash: YouTube (MSE video plays), GitHub, Wikipedia, Google, Yandex, VK,
+  Twitch (WebAssembly), Figma, Discord, Spotify, Netflix, Telegram Web, X, Apple, Apple Maps and the
+  WebGL Aquarium (WebGL), OpenStreetMap, Stack Overflow, Amazon, CNN, BBC, The New York Times,
+  Speedtest, Speedometer 3.1.
+- Safari: Reader, Develop ▸ Show Web Inspector, Preferences ▸ Privacy ▸ Details (the origin-data
+  manager lists sites and removes one), downloads, Private Browsing (a separate data store).
+- Not yet tested: back/forward and session restore after relaunch, resuming a stopped download,
+  JavaScript alert/confirm/prompt, History, Top Sites and the tab view, Safari extensions.
+
+Three crashes on Macs without AVX or RDTSCP (Core 2, Nehalem, Westmere, all of which run 10.9) came up
+here and are fixed on this branch; none is specific to Safari 9:
+
+- JavaScriptCore assumed AVX on Darwin and emitted VEX encodings from the JIT; it now asks the kernel
+  (`hw.optional.avx1_0`).
+- The JIT probe trampoline saved the vector registers with `vmovaps`, which killed WebAssembly workers;
+  Darwin now builds the SSE/AVX pair upstream builds elsewhere and picks one by AVX support.
+- abseil's benchmark timer ran `rdtscp` in a static initializer of libwebrtc, so every WebKit client
+  died at launch on Core 2; it now runs on first use, which WebKit never makes.
