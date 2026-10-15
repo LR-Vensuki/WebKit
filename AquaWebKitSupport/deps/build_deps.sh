@@ -1683,6 +1683,11 @@ echo "==== layout-test Apache ===="
 
 
 echo "==== collect into deps/build ===="
+# HLS now uses hlsdemux2 from gst-plugins-good, and gst-plugins-bad is built with -Dhls=disabled.
+# Meson install does not uninstall a previous build's legacy hlsdemux plugin from the shared prefix.
+# It imports the old patched adaptive-demux/downloader API, absent from 1.28.7, so collecting that
+# stale plugin makes an incremental upgrade fail the undefined-reference check.
+rm -f "$STAGE/lib/gstreamer-1.0/libgsthls.dylib"
 rm -f "$GAP_RELINK"
 # Asked again immediately before the collect step replaces the tree those links read from.
 _refuse_under_webkit_build
