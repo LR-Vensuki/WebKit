@@ -36,11 +36,18 @@
 #include <sys/sysctl.h>
 #endif
 
+// AQUAWEBKIT: 10.9 runs on Macs without AVX, so Darwin builds the SSE/AVX pair of probe trampolines
+// upstream builds for the other x86_64 platforms, chosen at run time by supportsAVX() (see
+// collectCPUFeatures()), instead of the AVX-only one; its vmovaps faulted in WebAssembly workers.
+#define AQUAWEBKIT_PROBE_TRAMPOLINE_PER_CPU 1
+
 namespace JSC {
 
 JSC_DECLARE_NOEXCEPT_JIT_OPERATION(ctiMasmProbeTrampoline, void, ());
 JSC_ANNOTATE_JIT_OPERATION_PROBE(ctiMasmProbeTrampoline);
-#if !OS(DARWIN)
+// AQUAWEBKIT: both trampolines on Darwin too (AQUAWEBKIT_PROBE_TRAMPOLINE_PER_CPU).
+// #if !OS(DARWIN)
+#if !OS(DARWIN) || AQUAWEBKIT_PROBE_TRAMPOLINE_PER_CPU
 JSC_DECLARE_NOEXCEPT_JIT_OPERATION(ctiMasmProbeTrampolineAVX, void, ());
 JSC_ANNOTATE_JIT_OPERATION_PROBE(ctiMasmProbeTrampolineAVX);
 #endif
@@ -193,7 +200,9 @@ static_assert(sizeof(Probe::State) == PROBE_SIZE, "Probe::State::size's matches 
     "vmovaps " STRINGIZE_VALUE_OF(PROBE_CPU_XMM14_VECTOR_OFFSET) "(%rbp), %xmm14" "\n" \
     "vmovaps " STRINGIZE_VALUE_OF(PROBE_CPU_XMM15_VECTOR_OFFSET) "(%rbp), %xmm15" "\n"
 
-#if !OS(DARWIN)
+// AQUAWEBKIT: the SSE save/restore sequences, for the trampoline Macs without AVX use.
+// #if !OS(DARWIN)
+#if !OS(DARWIN) || AQUAWEBKIT_PROBE_TRAMPOLINE_PER_CPU
 #define PROBE_XMM_SAVE_MOVAPS \
     "movaps %xmm0,  " STRINGIZE_VALUE_OF(PROBE_CPU_XMM0_VECTOR_OFFSET) "(%rsp)" "\n" \
     "movaps %xmm1,  " STRINGIZE_VALUE_OF(PROBE_CPU_XMM1_VECTOR_OFFSET) "(%rsp)" "\n" \
@@ -404,7 +413,9 @@ __asm__( \
     ASM_PREVIOUS_SECTION \
 );
 
-#if OS(DARWIN)
+// AQUAWEBKIT: not on 10.9, which runs on Macs without AVX; the #else pair is built instead.
+// #if OS(DARWIN)
+#if OS(DARWIN) && !AQUAWEBKIT_PROBE_TRAMPOLINE_PER_CPU
 // On macOS, all x86_64 CPUs support AVX. Use vmovaps unconditionally.
 DEFINE_PROBE_TRAMPOLINE(ctiMasmProbeTrampoline, PROBE_XMM_SAVE_VMOVAPS, PROBE_XMM_RESTORE_VMOVAPS,
     ctiMasmProbeTrampolineCopyLoop, ctiMasmProbeTrampolineProbeStateIsSafe, ctiMasmProbeTrampolineRestoreRegisters)
@@ -464,7 +475,9 @@ void MacroAssembler::probe(Probe::Function function, void* arg)
     push(RegisterID::eax);
     push(RegisterID::eax);
 
-#if OS(DARWIN)
+// AQUAWEBKIT: pick the trampoline by supportsAVX() on Darwin too (AQUAWEBKIT_PROBE_TRAMPOLINE_PER_CPU).
+// #if OS(DARWIN)
+#if OS(DARWIN) && !AQUAWEBKIT_PROBE_TRAMPOLINE_PER_CPU
     move(TrustedImmPtr(reinterpret_cast<void*>(ctiMasmProbeTrampoline)), RegisterID::eax);
 #else
     if (supportsAVX())
