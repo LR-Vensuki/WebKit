@@ -138,3 +138,37 @@ here and are fixed on this branch; none is specific to Safari 9:
   Darwin now builds the SSE/AVX pair upstream builds elsewhere and picks one by AVX support.
 - abseil's benchmark timer ran `rdtscp` in a static initializer of libwebrtc, so every WebKit client
   died at launch on Core 2; it now runs on first use, which WebKit never makes.
+
+
+## Upstream update validation (2026-10-15–16)
+
+Merge `9528be21a75` includes the upstream changes through `0c316cbbdfa0` and GStreamer 1.28.7.
+`f18c996e4ee` removes a legacy HLS plug-in left in the dependency install prefix by an earlier
+build; that obsolete plug-in imports symbols the new runtime no longer exports. The resumed
+build completed, the absent-reference audit passed for all 250 staged binaries and their slices,
+and the Safari ABI audit found zero missing symbols (138 JavaScriptCore, 307 WebKit and 690 WebKit2).
+
+The updated frameworks were installed in the 10.9.5 VM with Safari 9.1.3 on a Penryn CPU model
+without AVX. The following checks passed:
+
+- YouTube's Big Buck Bunny video played at 854×480; its playback time advanced from 41.70 to
+  54.98 seconds across the measurement interval, with no media error.
+- Twitch's public homepage, GitHub's WebKit repository, Wikipedia's Safari article, Figma's public
+  homepage, Telegram's QR login page and Google search loaded. No new crash reports or crash
+  events appeared during these page checks. This does not establish compatibility with signed-in
+  apps, Figma's editor, Twitch live playback or DRM services.
+- A WebAssembly add function returned 42 after 50,000 calls. WebGL Aquarium rendered fish with
+  a valid WebGL context, at about 7 fps in this VM; that is not a hardware performance benchmark.
+- The Mux Big Buck Bunny HLS sample played directly at 320×184 and 1280×720 for approximately
+  50 seconds each. The adaptive master switched from 720p through 480p to 1080p while playback
+  continued. Ten subsequent create/play/seek/close cycles and a seek to the final seconds followed
+  by end-of-stream and teardown produced no new crash reports.
+
+There is an unresolved HLS problem. The first adaptive-stream run stalled (only 2.23 seconds of
+media-time progress in a 12-second interval). A later operation in that long-lived WebContent
+process aborted with an invalid free in `gst_structure_free`, reached from `_gst_event_free`
+and `gst_audio_decoder_finish_frame_or_subframe` on a `multiqueue` audio thread. The installed
+GStreamer and WebCore UUIDs match the crash report. Stopping a stuck background Git scan and
+using a fresh WebContent process allowed the checks above to pass, but neither action proves
+that the invalid-free defect is fixed. Treat this update as a preview, not a bug-free release.
+The earlier page smoke results and this later failure must not be combined into a zero-crash claim.

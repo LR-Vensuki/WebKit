@@ -1,4 +1,9 @@
-AquaWebKit for OS X 10.9 Mavericks
+AquaWebKit for OS X 10.9 Mavericks — preview
+
+Known issue in this update: one long-running HLS session caused WebContent to
+crash with an invalid memory free in GStreamer. Short playback, quality changes
+and ten seek/close cycles passed afterward, but the cause is not fixed.
+This is an experimental build. See VALIDATION.txt for the tested scope.
 
 Modern WebKit as the system WebKit of OS X 10.9, for Safari 7 and for Safari 9.1.3.
 Installing it affects almost every app that shows web content, so keep a Time Machine backup.
@@ -15,4 +20,5 @@ Undo
   2. Restart the Mac.
 
 The disk image was built from the safari9 branch of the AquaWebKit backport
-(github.com/Wowfunhappy/WebKit); see BUILD-INFO.txt for the exact revision.
+(github.com/LR-Vensuki/WebKit), based on github.com/Wowfunhappy/WebKit.
+See BUILD-INFO.txt for the exact revision.

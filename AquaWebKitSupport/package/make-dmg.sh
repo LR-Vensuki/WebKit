@@ -26,6 +26,7 @@ cp -Rp "$REPO/AquaWebKitSupport/toolchain/build/cctools/bin" "$P/AquaWebKitSuppo
 cp -Rp "$STAGED" "$P/WebKitBuild/Release/staged"
 
 cp -p "$HERE/Install AquaWebKit.command" "$HERE/Restore Stock WebKit.command" "$HERE/README.txt" "$ROOT/"
+cp -p "$REPO/AquaWebKitSupport/docs/SAFARI-9.md" "$ROOT/VALIDATION.txt"
 chmod +x "$ROOT/"*.command
 {
     echo "Revision: $(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)"
