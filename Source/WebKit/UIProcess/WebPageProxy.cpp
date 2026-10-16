@@ -11552,6 +11552,7 @@ void WebPageProxy::runOpenPanel(IPC::Connection& connection, FrameIdentifier fra
 
     Ref parameters = API::OpenPanelParameters::create(settings);
     Ref openPanelResultListener = WebOpenPanelResultListenerProxy::create(this, protect(frame->process()));
+    openPanelResultListener->setAllowedMIMETypes(parameters->allowedMIMETypes()->toStringVector()); // AQUAWEBKIT: read by WKOpenPanelResultListenerChooseFiles.
     m_openPanelResultListener = openPanelResultListener.copyRef();
 
     if (m_controlledByAutomation) {
