@@ -1118,6 +1118,11 @@ void TestRunner::resetPageVisibility()
         [webView _setVisibilityState:WebPageVisibilityStateVisible isInitialState:YES];
 }
 
+void TestRunner::setUseDarkAppearanceForTesting(bool useDarkAppearance)
+{
+    [[mainFrame webView] _setUseDarkAppearance:useDarkAppearance];
+}
+
 void TestRunner::setPageVisibility(const char* newVisibility)
 {
     if (!newVisibility)

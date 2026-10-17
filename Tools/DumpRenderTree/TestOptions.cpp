@@ -69,6 +69,7 @@ const TestFeatures& TestOptions::defaults()
             { "AllowsInlineMediaPlayback", true },
             { "CanvasUsesAcceleratedDrawing", true },
             { "ColorFilterEnabled", true },
+            { "CSSUnprefixedBackdropFilterEnabled", true },
             { "CustomPasteboardDataEnabled", true },
             { "DOMAudioSessionEnabled", true },
             { "DOMPasteAllowed", true },

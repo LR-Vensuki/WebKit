@@ -17,7 +17,8 @@ const mediaControls = new MacOSFullscreenMediaControls({ width: 458, height: 100
 mediaControls.element.style.position = "relative";
 document.body.appendChild(mediaControls.element);
 
-step();
+// step();
+shouldBecomeEqual("mediaControls.muteButton.width > 0", "true", step);
 
 function step()
 {
@@ -27,6 +28,7 @@ function step()
     mediaControls.usesLTRUserInterfaceLayoutDirection = false;
     
     setTimeout(() => {
+        scheduler.flushScheduledLayoutCallbacks();
         const container = mediaControls.element.querySelector('.buttons-container.left');
         const muteButton = container.querySelector('.mute, .mute.bar, button');
         const volumeSlider = container.querySelector('.slider');

@@ -1777,6 +1777,7 @@ static void resetWebViewToConsistentState(const WTR::TestOptions& options, Reset
     [(EditingDelegate *)[webView editingDelegate] setAcceptsEditing:YES];
     [webView makeTextStandardSize:nil];
     [webView resetPageZoom:nil];
+    [webView _setUseDarkAppearance:NO];
     [webView _scaleWebView:1.0 atOrigin:NSZeroPoint];
 #if !PLATFORM(IOS_FAMILY)
     [webView _setCustomBackingScaleFactor:0];
@@ -1915,7 +1916,9 @@ static WTR::TestOptions testOptionsForTest(const WTR::TestCommand& command)
     }
     WTR::TestFeatures features = WTR::TestOptions::defaults();
     WTR::merge(features, WTR::hardcodedFeaturesBasedOnPathForTest(command));
+    WTR::merge(features, WTR::featureDefaultsFromSelfComparisonHeader(command, WTR::TestOptions::keyTypeMapping()));
     WTR::merge(features, WTR::featureDefaultsFromTestHeaderForTest(command, WTR::TestOptions::keyTypeMapping()));
+    WTR::merge(features, WTR::featureFromAdditionalHeaderOption(command, WTR::TestOptions::keyTypeMapping()));
 
     return WTR::TestOptions { WTF::move(features) };
 }

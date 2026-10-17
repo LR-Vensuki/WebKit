@@ -1838,6 +1838,15 @@ static JSValueRef runUIScriptCallback(JSContextRef context, JSObjectRef, JSObjec
     return JSValueMakeUndefined(context);
 }
 
+#if PLATFORM(COCOA)
+static JSValueRef setUseDarkAppearanceForTestingCallback(JSContextRef context, JSObjectRef, JSObjectRef thisObject, size_t argumentCount, const JSValueRef arguments[], JSValueRef*)
+{
+    if (argumentCount)
+        static_cast<TestRunner*>(JSObjectGetPrivate(thisObject))->setUseDarkAppearanceForTesting(JSValueToBoolean(context, arguments[0]));
+    return TestRunner::alwaysResolvePromise(context);
+}
+#endif
+
 static JSValueRef setPageScaleFactorCallback(JSContextRef context, JSObjectRef function, JSObjectRef thisObject, size_t argumentCount, const JSValueRef arguments[], JSValueRef* exception)
 {
     if (argumentCount == 3) {
@@ -2110,6 +2119,9 @@ const JSStaticFunction* TestRunner::staticFunctions()
         { "setObscuredContentInsets", setObscuredContentInsetsCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
         { "setHasMouseDeviceForTesting", setHasMouseDeviceForTestingCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
         { "setPageScaleFactor", setPageScaleFactorCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
+#if PLATFORM(COCOA)
+        { "setUseDarkAppearanceForTesting", setUseDarkAppearanceForTestingCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
+#endif
 #if PLATFORM(IOS_FAMILY)
         { "setPagePaused", setPagePausedCallback, kJSPropertyAttributeReadOnly | kJSPropertyAttributeDontDelete },
 #endif

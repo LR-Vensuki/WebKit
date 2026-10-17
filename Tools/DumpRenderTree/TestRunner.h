@@ -412,6 +412,9 @@ public:
     void setObscuredContentInsets(double top, double right, double bottom, double left);
 
     void setPageScaleFactor(double scaleFactor, long x, long y);
+#if PLATFORM(COCOA)
+    void setUseDarkAppearanceForTesting(bool);
+#endif
     static JSValueRef alwaysResolvePromise(JSContextRef);
 
     void setHasMouseDeviceForTesting(bool);

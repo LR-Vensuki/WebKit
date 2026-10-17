@@ -12,7 +12,13 @@ jsTestIsAsync = true;
 const imageA = document.getElementById("a");
 const imageB = document.getElementById("b");
 
-onload = function() {
+// onload = function() {
+onload = async function() {
+    // DumpRenderTree's offscreen window requires an explicit initial paint.
+    if (window.testRunner && !testRunner.isWebKit2) {
+        await new Promise(requestAnimationFrame);
+        testRunner.display();
+    }
     shouldBeTrue("internals.isImageAnimating(imageA)");
     shouldBeTrue("internals.isImageAnimating(imageB)");
 

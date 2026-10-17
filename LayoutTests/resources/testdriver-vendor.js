@@ -259,6 +259,10 @@ async function dispatchWheelActions(actions)
                 },
                 {
                     type : "wheel",
+                    phase : "ended"
+                },
+                {
+                    type : "wheel",
                     momentumPhase : "ended"
                 }
             ];
@@ -364,8 +368,15 @@ window.test_driver_internal.send_keys = async function(element, keys)
         return;
     }
 
-    for (const key of keyList)
-        await eventSender.asyncKeyDown(key, modifiers);
+    // for (const key of keyList)
+    //     await eventSender.asyncKeyDown(key, modifiers);
+    // DumpRenderTree delivers key events synchronously in the page process.
+    for (const key of keyList) {
+        if (testRunner.isWebKit2)
+            await eventSender.asyncKeyDown(key, modifiers);
+        else
+            eventSender.keyDown(key, modifiers);
+    }
 }
 
 /**
