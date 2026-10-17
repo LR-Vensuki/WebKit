@@ -616,6 +616,9 @@ private:
     void processIncomingSyncReply(UniqueRef<Decoder>);
 
     bool canSendOutgoingMessages() const;
+#if OS(DARWIN)
+    void didFailToSendOutgoingMessage(); // AQUAWEBKIT: record native send errors for flush callers.
+#endif
     bool NODELETE platformCanSendOutgoingMessages() const;
     void sendOutgoingMessages();
     bool sendOutgoingMessage(UniqueRef<Encoder>&&);
@@ -726,6 +729,11 @@ private:
     Lock m_outgoingMessagesLock;
     Deque<UniqueRef<Encoder>> m_outgoingMessages WTF_GUARDED_BY_LOCK(m_outgoingMessagesLock);
     Condition m_outgoingMessagesEmptyCondition WTF_GUARDED_BY_LOCK(m_outgoingMessagesLock);
+#if OS(DARWIN)
+    // AQUAWEBKIT: a dequeued encoder can still be in a native Mach send or pending retry.
+    bool m_didSendAllOutgoingMessages WTF_GUARDED_BY_LOCK(m_outgoingMessagesLock) { true };
+    bool m_didFailToSendOutgoingMessage WTF_GUARDED_BY_LOCK(m_outgoingMessagesLock) { false };
+#endif
 
     Condition m_waitForMessageCondition;
     Lock m_waitForMessageLock;

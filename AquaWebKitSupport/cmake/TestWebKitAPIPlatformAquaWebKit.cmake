@@ -66,3 +66,9 @@ set_target_properties(TestWebKitAPIInjectedBundle TestWebKitAPIWebProcessPlugIn 
     LIBRARY_OUTPUT_DIRECTORY "${TESTWEBKITAPI_RUNTIME_OUTPUT_DIRECTORY}")
 
 list(APPEND TestWebCore_LIBRARIES "-framework CoreVideo")
+
+# A native send can outlive the outgoing encoder deque while a Mach port is full.
+list(APPEND TestIPC_SOURCES
+    ${CMAKE_SOURCE_DIR}/AquaWebKitSupport/source/Tools/TestWebKitAPI/Tests/IPC/ConnectionFlushAquaWebKit.cpp
+    ${AQUAWEBKIT_SUPPORT}/source/WebKit/Platform/IPC/ConnectionAquaWebKit.cpp
+)

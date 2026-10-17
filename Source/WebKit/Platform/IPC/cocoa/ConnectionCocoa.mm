@@ -482,6 +482,9 @@ void Connection::resumeSendSource()
             // expected to hit MACH_SEND_TOO_LARGE on retry. Drop the message.
             RELEASE_LOG_ERROR(IPC, "resumeSendSource: Unexpected MACH_SEND_TOO_LARGE for pending message");
         }
+        // AQUAWEBKIT: include testing builds' Failure result when a retry drops its message.
+        if (result == SendMessageResult::MessageTooLarge || (result == SendMessageResult::Failure && platformCanSendOutgoingMessages()))
+            didFailToSendOutgoingMessage();
     }
     sendOutgoingMessages();
 }

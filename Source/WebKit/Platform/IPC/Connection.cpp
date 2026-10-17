@@ -511,7 +511,15 @@ Error Connection::flushSentMessages(Timeout timeout)
     do {
         if (!isValid())
             return Error::InvalidConnection;
+        // AQUAWEBKIT: native Mach retries outlive removal from the encoder deque.
+        // if (m_outgoingMessages.isEmpty())
+#if OS(DARWIN)
+        if (m_didFailToSendOutgoingMessage)
+            return Error::Unspecified;
+        if (m_didSendAllOutgoingMessages)
+#else
         if (m_outgoingMessages.isEmpty())
+#endif // AQUAWEBKIT: Cocoa waits for native delivery.
             return Error::NoError;
         m_outgoingMessagesEmptyCondition.waitUntil(m_outgoingMessagesLock, timeout.deadline());
     } while (!timeout.didTimeOut());
@@ -650,6 +658,9 @@ Error Connection::sendMessageImpl(UniqueRef<Encoder>&& encoder, OptionSet<SendOp
         Locker locker { m_outgoingMessagesLock };
         shouldDispatchMessageSend = m_outgoingMessages.isEmpty();
         m_outgoingMessages.append(WTF::move(encoder));
+#if OS(DARWIN)
+        m_didSendAllOutgoingMessages = false; // AQUAWEBKIT: completion includes the native send.
+#endif
         outgoingMessagesCount = m_outgoingMessages.size();
         shouldNotifyOfQueueGrowingLarge = m_outgoingMessageQueueIsGrowingLargeCallback && outgoingMessagesCount > largeOutgoingMessageQueueCountThreshold && (MonotonicTime::now() - m_lastOutgoingMessageQueueIsGrowingLargeCallbackCallTime) >= largeOutgoingMessageQueueTimeThreshold;
         if (shouldNotifyOfQueueGrowingLarge) {
@@ -1271,6 +1282,9 @@ void Connection::sendOutgoingMessages()
         {
             Locker locker { m_outgoingMessagesLock };
             if (m_outgoingMessages.isEmpty()) {
+#if OS(DARWIN)
+                m_didSendAllOutgoingMessages = true; // AQUAWEBKIT: reached only after pending Mach sends finish.
+#endif
                 m_outgoingMessagesEmptyCondition.notifyAll();
                 break;
             }
@@ -1278,8 +1292,16 @@ void Connection::sendOutgoingMessages()
         }
         ASSERT(message);
 
-        if (!sendOutgoingMessage(makeUniqueRefFromNonNullUniquePtr(WTF::move(message))))
+        // AQUAWEBKIT: track native retries and send errors through flush completion.
+        // if (!sendOutgoingMessage(makeUniqueRefFromNonNullUniquePtr(WTF::move(message))))
+        //     break;
+        if (!sendOutgoingMessage(makeUniqueRefFromNonNullUniquePtr(WTF::move(message)))) {
+#if OS(DARWIN)
+            if (canSendOutgoingMessages())
+                didFailToSendOutgoingMessage();
+#endif
             break;
+        } // AQUAWEBKIT: a pending or failed native send ends this drain.
     }
 }
 
