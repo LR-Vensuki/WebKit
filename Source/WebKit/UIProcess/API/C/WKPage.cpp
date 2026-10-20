@@ -4125,7 +4125,26 @@ void WKOriginDataManagerGetOrigins(WKWebsiteDataStoreRef store, WKOriginDataType
         wk109AnswerWithEmptyList(context, callback);
         return;
     }
-    wk109AnswerWithOrigins(store, dataTypes, context, callback);
+    if (!callback)
+        return;
+    // Cookies are kept per host name, not per origin, so a record carries them in cookieHostNames;
+    // each such host answers as its http origin, the form 601 reported a cookie-only site in.
+    protect(toImpl(store))->fetchData(dataTypes, { }, [context, callback](Vector<WebKit::WebsiteDataRecord> records) {
+        HashSet<WebCore::SecurityOriginData> seen;
+        Vector<RefPtr<API::Object>> origins;
+        for (auto& record : records) {
+            for (auto& origin : record.origins) {
+                if (seen.add(origin).isNewEntry)
+                    origins.append(API::SecurityOrigin::create(origin));
+            }
+            for (auto& hostName : record.cookieHostNames) {
+                WebCore::SecurityOriginData origin { "http"_s, hostName, std::nullopt };
+                if (seen.add(origin).isNewEntry)
+                    origins.append(API::SecurityOrigin::create(origin));
+            }
+        }
+        callback(toAPI(API::Array::create(WTF::move(origins)).ptr()), nullptr, context);
+    });
 }
 
 // Safari hands both deleters Safari::WK::didDeleteEntriesCallback(OpaqueWKError const*, void*) with its
@@ -4141,8 +4160,14 @@ void WKOriginDataManagerDeleteEntriesForOrigin(WKWebsiteDataStoreRef store, WKOr
         return;
     }
     WebKit::WebsiteDataRecord record;
-    for (auto type : dataTypes)
-        record.add(type, protect(toImpl(originRef))->securityOrigin());
+    auto origin = protect(toImpl(originRef))->securityOrigin();
+    for (auto type : dataTypes) {
+        // A record names cookies by host name; removeData reads them from cookieHostNames only.
+        if (type == WebKit::WebsiteDataType::Cookies)
+            record.addCookieHostName(origin.host());
+        else
+            record.add(type, origin);
+    }
     protect(toImpl(store))->removeData(dataTypes, { record }, [context, callback] {
         if (callback)
             callback(nullptr, context);
