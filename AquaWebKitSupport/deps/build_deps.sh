@@ -1318,6 +1318,10 @@ if prepare "$d"; then
     ( cd "$d" && patch -p1 --dry-run < "$HERE/patches/gst-plugins-base-audiodecoder-reset-subframe-samples.patch" \
         && patch -p1 < "$HERE/patches/gst-plugins-base-audiodecoder-reset-subframe-samples.patch" ) \
       || { echo "gst-plugins-base audiodecoder subframe-reset patch failed to apply"; exit 1; }
+    # audiodecoder: a GAP queued behind subframes keeps the queue's reference. See patches/README.md.
+    ( cd "$d" && patch -p1 --dry-run < "$HERE/patches/gst-plugins-base-audiodecoder-queued-gap-ownership.patch" \
+        && patch -p1 < "$HERE/patches/gst-plugins-base-audiodecoder-queued-gap-ownership.patch" ) \
+      || { echo "gst-plugins-base audiodecoder queued-gap patch failed to apply"; exit 1; }
     # video-format: 2-bit alpha unpacks to the full 16-bit range. See patches/README.md.
     ( cd "$d" && patch -p1 --dry-run < "$HERE/patches/gst-plugins-base-video-format-2bit-alpha.patch" \
         && patch -p1 < "$HERE/patches/gst-plugins-base-video-format-2bit-alpha.patch" ) \
