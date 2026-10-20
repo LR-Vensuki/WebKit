@@ -164,11 +164,19 @@ without AVX. The following checks passed:
   continued. Ten subsequent create/play/seek/close cycles and a seek to the final seconds followed
   by end-of-stream and teardown produced no new crash reports.
 
-There is an unresolved HLS problem. The first adaptive-stream run stalled (only 2.23 seconds of
-media-time progress in a 12-second interval). A later operation in that long-lived WebContent
-process aborted with an invalid free in `gst_structure_free`, reached from `_gst_event_free`
-and `gst_audio_decoder_finish_frame_or_subframe` on a `multiqueue` audio thread. The installed
-GStreamer and WebCore UUIDs match the crash report. Stopping a stuck background Git scan and
-using a fresh WebContent process allowed the checks above to pass, but neither action proves
-that the invalid-free defect is fixed. Treat this update as a preview, not a bug-free release.
-The earlier page smoke results and this later failure must not be combined into a zero-crash claim.
+The first adaptive-stream run stalled, and a later operation in that WebContent process aborted
+with an invalid free in `_gst_event_free`, reached from `gst_audio_decoder_finish_frame_or_subframe`
+on a `multiqueue` audio thread. The cause is in GStreamer itself (also unchanged on its main
+branch): `gst_audio_decoder_handle_gap()` queues a GAP that arrives while fdkaacdec has pushed only
+part of a frame as subframes, and then also unrefs it, so the queue later pushes a freed event.
+`deps/patches/gst-plugins-base-audiodecoder-queued-gap-ownership.patch` drops the extra unref.
+
+With that patch built in (2026-10-19), on the same VM and CPU model:
+
+- Ten create/play/seek/close cycles on the Mux HLS master, and its 10.5-minute film played from the
+  start through end-of-stream, with no crash.
+- Apple's bipbop advanced fMP4 HLS master played for 10 minutes (489 s of media at up to 1080p),
+  with no crash.
+
+The origin-data manager also names cookies by host now, as `WebsiteDataStore` keeps them, so a
+per-site removal of the cookie type reaches them; this was fixed from review, not exercised in Safari.

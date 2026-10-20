@@ -12,31 +12,41 @@ USER_HOME="$(eval echo "~${SUDO_USER:-root}")"
 export STOCK_BACKUP="$USER_HOME/AquaWebKit-backup"
 export PATH="$HERE/payload/AquaWebKitSupport/toolchain/build/cctools/bin:$PATH"
 ORIGINAL="$STOCK_BACKUP/replaced-original"
+WEBCLIP="/Library/Widgets/Web Clip.wdgt"
 BUNDLES="/System/Library/Frameworks/JavaScriptCore.framework
 /System/Library/Frameworks/WebKit.framework
 /System/Library/PrivateFrameworks/WebKit2.framework"
 
 # Check every copy before touching anything, so a missing one cannot leave /System half restored.
-echo "$BUNDLES" | while read -r bundle; do
-    [ -d "$ORIGINAL$bundle" ] || { echo "ERROR: no saved copy of $bundle in $ORIGINAL." >&2; exit 1; }
-done
+# The loops read from here-strings, not pipes: in bash 3.2 an exit inside a piped loop only ends the
+# loop's subshell, and set -e does not catch it.
+while IFS= read -r bundle; do
+    [ -d "$ORIGINAL$bundle" ] || { echo "ERROR: no saved copy of $bundle in $ORIGINAL; nothing was changed." >&2; exit 1; }
+done <<< "$BUNDLES"
+if [ -d "$WEBCLIP" ] && [ ! -d "$ORIGINAL$WEBCLIP" ]; then
+    echo "ERROR: no saved copy of the Web Clip widget in $ORIGINAL; nothing was changed." >&2
+    exit 1
+fi
 
 if [ -d "$STOCK_BACKUP/safari9" ]; then
     bash "$HERE/payload/AquaWebKitSupport/safari9/safari9.sh" restore
 fi
 
-echo "$BUNDLES" | while read -r bundle; do
+# Each original is copied beside its target first and swapped in only once the copy is complete.
+restore_item() {  # path, owner
+    rm -rf "$1.restoring"
+    cp -Rp "$ORIGINAL$1" "$1.restoring"
+    chown -R "$2" "$1.restoring"
+    rm -rf "$1"
+    mv "$1.restoring" "$1"
+}
+while IFS= read -r bundle; do
     echo "== $bundle"
-    rm -rf "$bundle"
-    cp -Rp "$ORIGINAL$bundle" "$bundle"
-    chown -R root:wheel "$bundle"
-done
-
-WEBCLIP="/Library/Widgets/Web Clip.wdgt"
+    restore_item "$bundle" root:wheel
+done <<< "$BUNDLES"
 if [ -d "$ORIGINAL$WEBCLIP" ]; then
-    rm -rf "$WEBCLIP"
-    cp -Rp "$ORIGINAL$WEBCLIP" "$WEBCLIP"
-    chown -R root:admin "$WEBCLIP"
+    echo "== $WEBCLIP"
+    restore_item "$WEBCLIP" root:admin
 fi
 
 /usr/libexec/xpchelper --rebuild-cache

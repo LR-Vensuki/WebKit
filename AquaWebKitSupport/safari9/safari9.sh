@@ -55,9 +55,25 @@ packed_version() {
     echo "${1:-0}" | awk -F. '{print ($1 + 0) * 65536 + ($2 + 0) * 256 + ($3 + 0)}'
 }
 
-# The dylibs an image loads, one path per line.
+# The dylibs an image loads, one path per line. Fails, rather than printing nothing, when otool
+# cannot read the image, so no caller mistakes an unreadable binary for an already-patched one.
 dylib_loads() {
-    "$OTOOL" -arch x86_64 -L "$1" | awk 'NR > 1 {print $1}'
+    local out
+    out="$("$OTOOL" -arch x86_64 -L "$1")" || { echo "ERROR: otool could not read $1" >&2; return 1; }
+    echo "$out" | awk 'NR > 1 {print $1}'
+}
+
+# True when the image $1 loads the legacy WebKit, i.e. Safari.framework as Apple shipped it. The load
+# list is captured first: grep -q on a pipe can end the writer early, which pipefail reports as failure.
+binds_legacy_webkit() {
+    local loads
+    loads="$(dylib_loads "$1")" || exit 1
+    case "$(printf '\n%s\n' "$loads")" in
+        *"
+$LEGACY_WEBKIT
+"*) return 0 ;;
+    esac
+    return 1
 }
 
 safari9_present() {
@@ -83,7 +99,7 @@ status() {
         return 0
     fi
     echo "Safari 9 staged framework: $(safari9_version)"
-    if dylib_loads "$SAFARI9_BINARY" | grep -qx "$LEGACY_WEBKIT"; then
+    if binds_legacy_webkit "$SAFARI9_BINARY"; then
         echo "  WebKit binds: from $LEGACY_WEBKIT (as Apple shipped it; run install)"
     else
         echo "  WebKit binds: from $MODERN_WEBKIT"
@@ -120,29 +136,44 @@ install() {
 
     echo "### Safari 9 ($(safari9_version)) on this port"
     mkdir -p "$SAFARI9_BACKUP"
-    if dylib_loads "$SAFARI9_BINARY" | grep -qx "$LEGACY_WEBKIT"; then
-        if [ ! -f "$SAFARI9_BACKUP/Safari" ]; then
-            cp -p "$SAFARI9_BINARY" "$SAFARI9_BACKUP/Safari"
-            rm -rf "$SAFARI9_BACKUP/_CodeSignature"
-            [ -d "$SAFARI9_SIGNATURE" ] && cp -Rp "$SAFARI9_SIGNATURE" "$SAFARI9_BACKUP/_CodeSignature"
+    chmod 700 "$SAFARI9_BACKUP"
+    if binds_legacy_webkit "$SAFARI9_BINARY"; then
+        # The binary is Apple's as shipped -- also after Safari 9 was reinstalled over an earlier
+        # patch -- so it is the one to keep. It is taken with its signature in a scratch folder and
+        # moved into place only once complete, so an interrupted copy never stands as the backup.
+        if ! cmp -s "$SAFARI9_BINARY" "$SAFARI9_BACKUP/Safari"; then
+            rm -rf "$SAFARI9_BACKUP/.incoming"
+            mkdir "$SAFARI9_BACKUP/.incoming"
+            cp -p "$SAFARI9_BINARY" "$SAFARI9_BACKUP/.incoming/Safari"
+            [ -d "$SAFARI9_SIGNATURE" ] && cp -Rp "$SAFARI9_SIGNATURE" "$SAFARI9_BACKUP/.incoming/_CodeSignature"
+            rm -rf "$SAFARI9_BACKUP/Safari" "$SAFARI9_BACKUP/_CodeSignature"
+            [ -d "$SAFARI9_BACKUP/.incoming/_CodeSignature" ] && mv "$SAFARI9_BACKUP/.incoming/_CodeSignature" "$SAFARI9_BACKUP/"
+            mv "$SAFARI9_BACKUP/.incoming/Safari" "$SAFARI9_BACKUP/Safari"
+            rmdir "$SAFARI9_BACKUP/.incoming"
             echo "  backed up $SAFARI9_BINARY -> $SAFARI9_BACKUP"
         fi
         "$INSTALL_NAME_TOOL" -change "$LEGACY_WEBKIT" "$MODERN_WEBKIT" "$SAFARI9_BINARY"
         # The edit voids Apple's signature over the load commands; an ad-hoc one keeps the bundle
         # self-consistent. Nested code (the SocialHelper service) keeps its own signature.
-        codesign -f -s - "$SAFARI9_BUNDLE" 2>/dev/null || echo "  (could not re-sign $SAFARI9_BUNDLE ad hoc; it loads unsigned)"
+        # codesign shells out to codesign_allocate, which without the Command Line Tools is only an
+        # xcselect stub; the toolchain's own copy rides along with this script.
+        CODESIGN_ALLOCATE="$CCTOOLS/codesign_allocate" codesign -f -s - "$SAFARI9_BUNDLE" \
+            || echo "  (could not re-sign $SAFARI9_BUNDLE ad hoc; it loads unsigned)"
         echo "  Safari.framework now binds its WebKit symbols from $MODERN_WEBKIT"
     else
         echo "  Safari.framework already binds its WebKit symbols from $MODERN_WEBKIT"
     fi
-    if dylib_loads "$SAFARI9_BINARY" | grep -qx "$LEGACY_WEBKIT"; then
+    if binds_legacy_webkit "$SAFARI9_BINARY"; then
         echo "ERROR: $SAFARI9_BINARY still loads $LEGACY_WEBKIT." >&2
         exit 1
     fi
 
     if [ -d "$STAGED_INSPECTOR_UI" ] && staged_framework_wins "$STAGED_INSPECTOR_UI/Versions/A/WebInspectorUI"; then
-        rm -rf "$SAFARI9_BACKUP/WebInspectorUI.framework"
+        # The staged copy is Apple's (a newer one if Safari 9 was reinstalled): it replaces any older backup.
+        rm -rf "$SAFARI9_BACKUP/WebInspectorUI.framework.old"
+        [ -d "$SAFARI9_BACKUP/WebInspectorUI.framework" ] && mv "$SAFARI9_BACKUP/WebInspectorUI.framework" "$SAFARI9_BACKUP/WebInspectorUI.framework.old"
         mv "$STAGED_INSPECTOR_UI" "$SAFARI9_BACKUP/WebInspectorUI.framework"
+        rm -rf "$SAFARI9_BACKUP/WebInspectorUI.framework.old"
         echo "  set the staged WebInspectorUI aside, so Safari 9 uses $SYSTEM_INSPECTOR_UI"
     fi
     echo "  done. Quit Safari before launching it again."
@@ -152,17 +183,22 @@ restore() {
     [ "$(id -u)" = 0 ] || { echo "ERROR: this writes to /System -- run it as root: sudo bash $0 restore" >&2; exit 1; }
     [ -d "$SAFARI9_BACKUP" ] || { echo "No backup at $SAFARI9_BACKUP; nothing to restore."; return 0; }
     if [ -f "$SAFARI9_BACKUP/Safari" ] && [ -d "$SAFARI9_BUNDLE" ]; then
-        cp -p "$SAFARI9_BACKUP/Safari" "$SAFARI9_BINARY"
+        # Into a new file renamed over the old one, so a running Safari keeps the image it mapped.
+        cp -p "$SAFARI9_BACKUP/Safari" "$SAFARI9_BINARY.restoring"
+        mv -f "$SAFARI9_BINARY.restoring" "$SAFARI9_BINARY"
         if [ -d "$SAFARI9_BACKUP/_CodeSignature" ]; then
             rm -rf "$SAFARI9_SIGNATURE"
             cp -Rp "$SAFARI9_BACKUP/_CodeSignature" "$SAFARI9_SIGNATURE"
         fi
+        chown root:wheel "$SAFARI9_BINARY"
+        [ -d "$SAFARI9_SIGNATURE" ] && chown -R root:wheel "$SAFARI9_SIGNATURE"
         rm -rf "$SAFARI9_BACKUP/Safari" "$SAFARI9_BACKUP/_CodeSignature"
         echo "  restored $SAFARI9_BINARY"
     fi
-    if [ -d "$SAFARI9_BACKUP/WebInspectorUI.framework" ]; then
+    if [ -d "$SAFARI9_BACKUP/WebInspectorUI.framework" ] && [ -d "$STAGED" ]; then
         rm -rf "$STAGED_INSPECTOR_UI"
         mv "$SAFARI9_BACKUP/WebInspectorUI.framework" "$STAGED_INSPECTOR_UI"
+        chown -R root:wheel "$STAGED_INSPECTOR_UI"
         echo "  restored $STAGED_INSPECTOR_UI"
     fi
     rmdir "$SAFARI9_BACKUP" 2>/dev/null || true

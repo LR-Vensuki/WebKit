@@ -68,12 +68,14 @@ make $J -C ld64/src/3rd
 make $J -C ld64/src/other dyldinfo
 
 # What this port reads and edits Mach-O with, plus the tools the autotools, meson and cmake
-# sub-builds resolve off PATH themselves -- this directory is what they find.
+# sub-builds resolve off PATH themselves -- this directory is what they find. codesign_allocate is
+# what /usr/bin/codesign shells out to; safari9/safari9.sh hands it over on Macs without the
+# Command Line Tools, where /usr/bin/codesign_allocate is only the xcselect stub.
 echo "### Installing into $PREFIX"
 rm -rf "$PREFIX"
 mkdir -p "$PREFIX/bin"
 install -m 755 otool/otool misc/lipo misc/install_name_tool misc/nm misc/nmedit misc/strip \
-        misc/size misc/strings misc/libtool misc/ranlib ar/ar \
+        misc/size misc/strings misc/libtool misc/ranlib misc/codesign_allocate ar/ar \
         ld64/src/other/dyldinfo "$PREFIX/bin/"
 
 echo "### cctools ready: $(ls "$PREFIX/bin" | tr '\n' ' ')"
