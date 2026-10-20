@@ -76,6 +76,30 @@ $LEGACY_WEBKIT
     return 1
 }
 
+# True when the image $1 carries a code signature (LC_CODE_SIGNATURE).
+has_code_signature() {
+    local cmds
+    cmds="$("$OTOOL" -arch x86_64 -l "$1")" || { echo "ERROR: otool could not read $1" >&2; exit 1; }
+    case "$cmds" in *LC_CODE_SIGNATURE*) return 0 ;; esac
+    return 1
+}
+
+# Moves the patched copy $1 of Safari.framework's binary into place without its code signature. The
+# patch voids Apple's signature, and the kernel kills a process that maps a page whose signature no
+# longer matches; 10.9 loads unsigned frameworks. An ad-hoc signature is no option: codesign only
+# runs an Apple-signed codesign_allocate, which a Mac without the Command Line Tools lacks. The copy
+# is renamed over the binary, so a running Safari keeps the image it mapped. Nested code (the
+# SocialHelper service) keeps its own signature; the bundle's seal goes with the binary's.
+replace_unsigned() {
+    rm -f "$1.unsigned"
+    "$CCTOOLS/codesign_allocate" -i "$1" -r -o "$1.unsigned"
+    rm -f "$1"
+    chown root:wheel "$1.unsigned"
+    chmod 755 "$1.unsigned"
+    mv -f "$1.unsigned" "$SAFARI9_BINARY"
+    rm -rf "$SAFARI9_SIGNATURE"
+}
+
 safari9_present() {
     [ -f "$SAFARI9_BINARY" ]
 }
@@ -152,16 +176,21 @@ install() {
             rmdir "$SAFARI9_BACKUP/.incoming"
             echo "  backed up $SAFARI9_BINARY -> $SAFARI9_BACKUP"
         fi
-        "$INSTALL_NAME_TOOL" -change "$LEGACY_WEBKIT" "$MODERN_WEBKIT" "$SAFARI9_BINARY"
-        # The edit voids Apple's signature over the load commands; an ad-hoc one keeps the bundle
-        # self-consistent. Nested code (the SocialHelper service) keeps its own signature.
-        # codesign shells out to codesign_allocate, which without the Command Line Tools is only an
-        # xcselect stub; the toolchain's own copy rides along with this script.
-        CODESIGN_ALLOCATE="$CCTOOLS/codesign_allocate" codesign -f -s - "$SAFARI9_BUNDLE" \
-            || echo "  (could not re-sign $SAFARI9_BUNDLE ad hoc; it loads unsigned)"
+        rm -f "$SAFARI9_BINARY.patching"
+        cp -p "$SAFARI9_BINARY" "$SAFARI9_BINARY.patching"
+        "$INSTALL_NAME_TOOL" -change "$LEGACY_WEBKIT" "$MODERN_WEBKIT" "$SAFARI9_BINARY.patching"
+        replace_unsigned "$SAFARI9_BINARY.patching"
         echo "  Safari.framework now binds its WebKit symbols from $MODERN_WEBKIT"
     else
         echo "  Safari.framework already binds its WebKit symbols from $MODERN_WEBKIT"
+        # Earlier versions of this script left the patched binary with a signature that no longer
+        # matched it, and the kernel kills Safari on the first page it checks against it.
+        if has_code_signature "$SAFARI9_BINARY"; then
+            rm -f "$SAFARI9_BINARY.patching"
+            cp -p "$SAFARI9_BINARY" "$SAFARI9_BINARY.patching"
+            replace_unsigned "$SAFARI9_BINARY.patching"
+            echo "  took the stale signature off $SAFARI9_BINARY"
+        fi
     fi
     if binds_legacy_webkit "$SAFARI9_BINARY"; then
         echo "ERROR: $SAFARI9_BINARY still loads $LEGACY_WEBKIT." >&2

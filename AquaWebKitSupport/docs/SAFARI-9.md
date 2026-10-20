@@ -76,7 +76,10 @@ would also load all of WK2 into every WebKitLegacy client on the system.
 
 `safari9.sh install` therefore changes the one load command in the staged Safari.framework that names
 `WebKit.framework/Versions/A/WebKit` to name `WebKit2.framework/Versions/A/WebKit2` (the header has room),
-then signs the bundle ad hoc. All 627 binds then resolve through WebKit2 and, for the 24 WK1 symbols,
+then takes the binary's code signature off: the edit voids Apple's, and the kernel kills a process that
+maps a page whose signature no longer matches, while 10.9 loads unsigned frameworks. (An ad-hoc signature
+would need codesign, which only runs an Apple-signed `codesign_allocate`, so not on a Mac without the
+Command Line Tools.) All 627 binds then resolve through WebKit2 and, for the 24 WK1 symbols,
 its re-export of WebKitLegacy. The same file is Safari's WebProcess plug-in: Safari passes
 `[NSBundle bundleWithIdentifier:@"com.apple.Safari.framework"].bundlePath`, the staged path, so the
 WebContent processes, which do not search the staged directory, load the edited binary too.

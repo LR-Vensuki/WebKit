@@ -68,9 +68,9 @@ make $J -C ld64/src/3rd
 make $J -C ld64/src/other dyldinfo
 
 # What this port reads and edits Mach-O with, plus the tools the autotools, meson and cmake
-# sub-builds resolve off PATH themselves -- this directory is what they find. codesign_allocate is
-# what /usr/bin/codesign shells out to; safari9/safari9.sh hands it over on Macs without the
-# Command Line Tools, where /usr/bin/codesign_allocate is only the xcselect stub.
+# sub-builds resolve off PATH themselves -- this directory is what they find. codesign_allocate -r is
+# how safari9/safari9.sh takes the signature off the Safari.framework it patches; codesign itself
+# would only run an Apple-signed codesign_allocate, which a Mac without the Command Line Tools lacks.
 echo "### Installing into $PREFIX"
 rm -rf "$PREFIX"
 mkdir -p "$PREFIX/bin"
